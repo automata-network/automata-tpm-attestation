@@ -30,7 +30,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         if (block.timestamp > validityNotAfter) {
             revert("cert expired");
         }
-        CertPubkey memory issuer = LibX509.getCertIssuer(ca);
+        CertPubkey memory issuer = LibX509.getPubkey(ca);
         bool result = verifySignature(sha256(LibX509.getCertTbs(ca)), LibX509.getCertSignature(ca), issuer);
         require(result, "verify sig failed");
         verifiedCertIssuers[key] = CertType.CA;
@@ -57,7 +57,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
 
         // check verified
         for (uint256 i = 0; i < certLen; i++) {
-            issuers[i] = LibX509.getCertIssuer(certs[i]);
+            issuers[i] = LibX509.getPubkey(certs[i]);
             CertType cachedCertType = verifiedCertIssuers[certHashes[i]];
             if (i == certLen - 1 && cachedCertType == CertType.CA) {
                 verified = i;

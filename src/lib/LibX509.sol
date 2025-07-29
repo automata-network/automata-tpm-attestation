@@ -153,7 +153,7 @@ library LibX509 {
         (validityNotBefore, validityNotAfter) = _getValidity(der, tbsPtr);
     }
 
-    function getCertIssuer(bytes calldata der) internal pure returns (CertPubkey memory) {
+    function getPubkey(bytes calldata der) internal pure returns (CertPubkey memory) {
         uint256 root = der.root();
         uint256 tbsParentPtr = der.firstChildOf(root);
         uint256 tbsPtr = der.firstChildOf(tbsParentPtr);
