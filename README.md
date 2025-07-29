@@ -202,6 +202,9 @@ if (success) {
 
 Validates PCR measurements against the TPM quote.
 
+> [!NOTE]
+> PCR Digest currently only supports SHA256 hash (`HASH_SHA256 = 0x000B`).
+
 ```solidity
 function checkPcrMeasurements(
     bytes calldata tpmQuote,

@@ -267,7 +267,6 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
     }
 
     function _verifyEvents(MeasureablePcr calldata mpcr) private pure returns (bool) {
-        
         // Early return conditions
         if (mpcr.pcr == bytes32(0)) {
             return true;
