@@ -2,7 +2,7 @@
 // Automata Contracts
 pragma solidity ^0.8.20;
 
-import {ITpmAttestation, MeasureablePcr} from "./interfaces/ITpmAttestation.sol";
+import {ITpmAttestation, MeasureablePcr, Pcr} from "./interfaces/ITpmAttestation.sol";
 import {LibX509, CertPubkey, CertChainRegistry} from "./bases/CertChainRegistry.sol";
 
 // TPM Quote Layout:
@@ -36,45 +36,139 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
 
     constructor(address _intitialOwner, address _p256) CertChainRegistry(_intitialOwner, _p256) {}
 
-    function verifyTpmQuote(
-        bytes32 userDataHash,
-        bytes calldata tpmQuote,
-        bytes calldata tpmSignature,
-        MeasureablePcr[] calldata tpmPcrs,
-        bytes[] calldata akCertchain
-    ) external override returns (bool, string memory) {
+    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, bytes[] calldata akCertchain)
+        external
+        override
+        returns (bool, string memory)
+    {
         CertPubkey memory akPub = verifyCertChain(akCertchain);
         if (akPub.data.length == 0) {
             return (false, "Invalid AK certificate chain");
         }
-        return _verifyTpmQuote(userDataHash, tpmQuote, tpmSignature, tpmPcrs, akPub);
+        return _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
     }
 
-    function verifyTpmQuote(
-        bytes32 userDataHash,
-        bytes calldata tpmQuote,
-        bytes calldata tpmSignature,
-        MeasureablePcr[] calldata tpmPcrs,
-        CertPubkey calldata akPub
-    ) external view override returns (bool, string memory) {
-        return _verifyTpmQuote(userDataHash, tpmQuote, tpmSignature, tpmPcrs, akPub);
+    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey calldata akPub)
+        external
+        view
+        override
+        returns (bool, string memory)
+    {
+        return _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
     }
 
-    function _verifyTpmQuote(
-        bytes32 userDataHash,
-        bytes calldata tpmQuote,
-        bytes calldata tpmSignature,
-        MeasureablePcr[] calldata tpmPcrs,
-        CertPubkey memory akPub
-    ) private view returns (bool success, string memory errMessage) {
-        // Step 1: Verify the TPM quote structure
-        (success, errMessage) = _verifyTpmQuoteSignature(tpmQuote, tpmSignature, akPub);
-        if (!success) {
-            return (false, errMessage);
+    function extractExtraData(bytes calldata tpmQuote)
+        external
+        pure
+        override
+        returns (bool success, bytes memory extraData)
+    {
+        (success,,, extraData) = _readTpmHeaders(tpmQuote);
+    }
+
+    function checkPcrMeasurements(bytes calldata tpmQuote, MeasureablePcr[] calldata tpmPcrs)
+        external
+        pure
+        override
+        returns (bool success, bytes memory extraData)
+    {
+        uint256 offset;
+        {
+            uint16 qualifiedSignerLen;
+            uint16 extraDataLen;
+            (success, qualifiedSignerLen, extraDataLen, extraData) = _readTpmHeaders(tpmQuote);
+            if (!success) {
+                return (false, extraData);
+            }
+            offset = 35 + qualifiedSignerLen + extraDataLen;
         }
 
-        // Step 2: Check User Data and Measureable PCRs against the TPM quote
-        (success, errMessage) = _checkUserDataAndPcrs(userDataHash, tpmPcrs, tpmQuote);
+        uint32 tpmsPCRCount = uint32(bytes4(tpmQuote[offset:offset + 4]));
+        if (tpmsPCRCount != 1) {
+            return (false, bytes("tpmsPCRCount != 1"));
+        }
+        offset += 4;
+
+        uint16 tpmPcrHash = uint16(bytes2(tpmQuote[offset:offset + 2]));
+        if (tpmPcrHash != HASH_SHA256) {
+            return (false, bytes("TPM PCR hash is not SHA256"));
+        }
+        offset += 2;
+
+        uint8 pcrsSize = uint8(tpmQuote[offset]);
+        bytes4 pcrSelection = bytes4(tpmQuote[offset + 1:offset + 1 + pcrsSize]);
+        if (pcrSelection != _compactSelections(tpmPcrs)) {
+            return (false, bytes("PCR selections do not match"));
+        }
+        offset += 1 + pcrsSize;
+
+        uint16 pcrDigestSize = uint16(bytes2(tpmQuote[offset:offset + 2]));
+        if (pcrDigestSize != 32) {
+            return (false, bytes("Invalid PCR digest size"));
+        }
+        offset += 2;
+
+        bytes32 pcrDigest = bytes32(tpmQuote[offset:offset + pcrDigestSize]);
+        bytes32 expectedDigest = _digest(tpmPcrs);
+        if (pcrDigest != expectedDigest) {
+            return (false, bytes("PCR digest does not match expected digest"));
+        }
+
+        return (true, extraData);
+    }
+
+    function toGoldenMeasurement(MeasureablePcr[] calldata mpcrs) external pure override returns (Pcr[] memory) {
+        // Cache array length to avoid multiple storage reads
+        uint256 mpcrsLength = mpcrs.length;
+        Pcr[] memory pcrs = new Pcr[](mpcrsLength);
+
+        // Use unchecked to save gas on bounds checking where we know it's safe
+        unchecked {
+            for (uint256 i = 0; i < mpcrsLength; i++) {
+                // Cache the current MeasureablePcr to avoid multiple calldata accesses
+                MeasureablePcr calldata currentMpcr = mpcrs[i];
+
+                // Verify events before allocating memory for arrays
+                require(_verifyEvents(currentMpcr), "Invalid all events");
+
+                // Cache the measureEventsIdx length
+                uint256 eventsIdxLength = currentMpcr.measureEventsIdx.length;
+
+                // Only allocate memory if there are events to process
+                bytes32[] memory measureEvents = new bytes32[](eventsIdxLength);
+                uint256[] memory measureEventsIdx = new uint256[](eventsIdxLength);
+
+                // Process events only if there are any
+                if (eventsIdxLength > 0) {
+                    uint256 allEventsLength = currentMpcr.allEvents.length;
+
+                    for (uint256 j = 0; j < eventsIdxLength; j++) {
+                        uint256 eventIdx = currentMpcr.measureEventsIdx[j];
+                        require(eventIdx < allEventsLength, "Invalid event index");
+                        measureEvents[j] = currentMpcr.allEvents[eventIdx];
+                        measureEventsIdx[j] = eventIdx;
+                    }
+                }
+
+                // Create the PCR with the correct values
+                pcrs[i] = Pcr({
+                    index: currentMpcr.index,
+                    pcr: currentMpcr.measurePcr ? currentMpcr.pcr : bytes32(0),
+                    measureEvents: measureEvents,
+                    measureEventsIdx: measureEventsIdx
+                });
+            }
+        }
+
+        return pcrs;
+    }
+
+    function _verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub)
+        private
+        view
+        returns (bool success, string memory errMessage)
+    {
+        (success, errMessage) = _verifyTpmQuoteSignature(tpmQuote, tpmSignature, akPub);
         if (!success) {
             return (false, errMessage);
         }
@@ -125,67 +219,20 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         return (true, "");
     }
 
-    function _checkUserDataAndPcrs(bytes32 userDataHash, MeasureablePcr[] calldata tpmPcrs, bytes calldata tpmQuote)
+    function _readTpmHeaders(bytes calldata tpmQuote)
         private
         pure
-        returns (bool, string memory)
+        returns (bool success, uint16 qualifiedSignerLen, uint16 extraDataLen, bytes memory retData)
     {
-        uint256 offset;
-
-        {
-            uint16 attType = uint16(bytes2(tpmQuote[4:6]));
-            if (attType != 0x8018) {
-                return (false, "attType != 0x8018");
-            }
-
-            uint16 qualifiedSignerLen = uint16(bytes2(tpmQuote[6:8]));
-            uint16 extraDataOffset = 10 + qualifiedSignerLen;
-            uint16 extraDataLen = uint16(bytes2(tpmQuote[8 + qualifiedSignerLen:extraDataOffset]));
-
-            if (extraDataLen != 32) {
-                return (false, "Invalid extra data length");
-            }
-
-            bytes32 extraData = bytes32(tpmQuote[extraDataOffset:extraDataOffset + extraDataLen]);
-            if (extraData != userDataHash) {
-                return (false, "User data hash does not match extra data in TPM quote");
-            }
-
-            offset = 35 + qualifiedSignerLen + extraDataLen;
+        uint16 attType = uint16(bytes2(tpmQuote[4:6]));
+        if (attType != 0x8018) {
+            return (false, qualifiedSignerLen, extraDataLen, bytes("attType != 0x8018"));
         }
 
-        uint32 tpmsPCRCount = uint32(bytes4(tpmQuote[offset:offset + 4]));
-        if (tpmsPCRCount != 1) {
-            return (false, "tpmsPCRCount != 1");
-        }
-        offset += 4;
-
-        uint16 tpmPcrHash = uint16(bytes2(tpmQuote[offset:offset + 2]));
-        if (tpmPcrHash != HASH_SHA256) {
-            return (false, "TPM PCR hash is not SHA256");
-        }
-        offset += 2;
-
-        uint8 pcrsSize = uint8(tpmQuote[offset]);
-        bytes4 pcrSelection = bytes4(tpmQuote[offset + 1:offset + 1 + pcrsSize]);
-        if (pcrSelection != _compactSelections(tpmPcrs)) {
-            return (false, "PCR selections do not match");
-        }
-        offset += 1 + pcrsSize;
-
-        uint16 pcrDigestSize = uint16(bytes2(tpmQuote[offset:offset + 2]));
-        if (pcrDigestSize != 32) {
-            return (false, "Invalid PCR digest size");
-        }
-        offset += 2;
-
-        bytes32 pcrDigest = bytes32(tpmQuote[offset:offset + pcrDigestSize]);
-        bytes32 expectedDigest = _digest(tpmPcrs);
-        if (pcrDigest != expectedDigest) {
-            return (false, "PCR digest does not match expected digest");
-        }
-
-        return (true, "");
+        qualifiedSignerLen = uint16(bytes2(tpmQuote[6:8]));
+        extraDataLen = uint16(bytes2(tpmQuote[8 + qualifiedSignerLen:10 + qualifiedSignerLen]));
+        retData = tpmQuote[10 + qualifiedSignerLen:10 + qualifiedSignerLen + extraDataLen];
+        success = true;
     }
 
     function _compactSelections(MeasureablePcr[] calldata tpmPcrs) private pure returns (bytes4) {
@@ -217,5 +264,28 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         }
 
         return sha256(concatenated);
+    }
+
+    function _verifyEvents(MeasureablePcr calldata mpcr) private pure returns (bool) {
+        
+        // Early return conditions
+        if (mpcr.pcr == bytes32(0)) {
+            return true;
+        }
+
+        uint256 allEventsLength = mpcr.allEvents.length;
+        if (allEventsLength == 0) {
+            return true;
+        }
+
+        bytes32 before = bytes32(0);
+        // Use unchecked for loop operations to save gas
+        unchecked {
+            for (uint256 i = 0; i < allEventsLength; i++) {
+                before = sha256(abi.encodePacked(before, mpcr.allEvents[i]));
+            }
+        }
+
+        return before == mpcr.pcr;
     }
 }

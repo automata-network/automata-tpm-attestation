@@ -37,38 +37,53 @@ import {ICertChainRegistry, CertPubkey} from "./ICertChainRegistry.sol";
 interface ITpmAttestation is ICertChainRegistry {
     /**
      * @notice Verifies a TPM quote
-     * @param userDataHash - The hash of the user data
      * @param tpmQuote - The TPM quote to verify
      * @param tpmSignature - The signature of the TPM quote
-     * @param tpmPcrs - The PCR measuremnts to validate against the PCR digest in the TPM quote
      * @param akCertchain - The attestation key certificate chain
      * @return success - Whether the verification was successful
      * @return errorMessage - An error message if the verification failed
      */
-    function verifyTpmQuote(
-        bytes32 userDataHash,
-        bytes calldata tpmQuote,
-        bytes calldata tpmSignature,
-        MeasureablePcr[] calldata tpmPcrs,
-        bytes[] calldata akCertchain
-    ) external returns (bool, string memory);
+    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, bytes[] calldata akCertchain)
+        external
+        returns (bool, string memory);
 
     /**
-     * @notice Verifies a TPM quote
-     * @dev akPub must be pre-verified before calling this function (saves gas from verifying the entire cert chain)
-     * @param userDataHash - The hash of the user data
+     * @notice Verifies a TPM quote using pre-verified / trusted public AK
+     * @dev is responsible for ensuring akPub is valid (saves gas from verifying the entire cert chain)
      * @param tpmQuote - The TPM quote to verify
      * @param tpmSignature - The signature of the TPM quote
-     * @param tpmPcrs - The PCR measuremnts to validate against the PCR digest in the TPM quote
      * @param akPub - A pre-verified attestation public key
      * @return success - Whether the verification was successful
      * @return errorMessage - An error message if the verification failed
      */
-    function verifyTpmQuote(
-        bytes32 userDataHash,
-        bytes calldata tpmQuote,
-        bytes calldata tpmSignature,
-        MeasureablePcr[] calldata tpmPcrs,
-        CertPubkey calldata akPub
-    ) external view returns (bool, string memory);
+    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey calldata akPub)
+        external
+        returns (bool, string memory);
+
+    /**
+     * Extracts extra data from the TPM quote
+     * @param tpmQuote - TPM quote
+     * @return success - Whether the extraction was successful
+     * @return extraData - The extracted extra data from the TPM quote, otherwise an error message
+     */
+    function extractExtraData(bytes calldata tpmQuote) external pure returns (bool success, bytes memory extraData);
+
+    /**
+     * @notice Checks the PCR measurements against the TPM quote
+     * @param tpmQuote - The TPM quote to check
+     * @param tpmPcrs - The PCR measurements to validate against the PCR digest in the TPM quote
+     * @return success - Whether the check was successful
+     * @return returnData - if success is true, this returns the extracted user data from the TPM quote
+     * @dev if success is false, returnData will contain an error message
+     */
+    function checkPcrMeasurements(bytes calldata tpmQuote, MeasureablePcr[] calldata tpmPcrs)
+        external
+        returns (bool, bytes memory);
+
+    /**
+     * @notice Converts the PCR measurements to a golden measurement format
+     * @param tpmPcrs - The PCR measurements to convert
+     * @return pcrs - The converted PCR measurements in golden measurement format
+     */
+    function toGoldenMeasurement(MeasureablePcr[] calldata tpmPcrs) external returns (Pcr[] memory);
 }
