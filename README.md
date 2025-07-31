@@ -354,6 +354,10 @@ forge build
 forge test
 ```
 
+## Licensing
+
+This project is currently licensed under [Apache](./LICENSE).
+
 ## Contributing
 
 Contributions are welcome! Please ensure all tests pass and follow the existing code style.

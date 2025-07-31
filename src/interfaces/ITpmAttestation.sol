@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache2
 // Automata Contracts
 pragma solidity ^0.8.0;
 
