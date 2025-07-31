@@ -8,6 +8,10 @@ TPM attestation provides a mechanism to cryptographically prove the integrity an
 
 The `TpmAttestation` contract extends `CertChainRegistry` to provide a complete solution for managing trusted Certificate Authorities (CAs) that issue TPM Attestation Keys and verifying the entire attestation chain.
 
+## Deployment Info
+
+TBD
+
 ## TPM Attestation Workflow
 
 ```
@@ -79,7 +83,7 @@ Add to your `foundry.toml`:
 
 ```toml
 remappings = [
-    "@automata-tpm-attestation/=lib/automata-tpm-attestation/src/",
+    "@automata-network/automata-tpm-attestation/=lib/automata-tpm-attestation/src/",
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "@solady/=lib/solady/src/"
 ]
