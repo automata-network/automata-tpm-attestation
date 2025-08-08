@@ -53,7 +53,6 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
 
     function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey calldata akPub)
         external
-        view
         override
         returns (bool, string memory)
     {
@@ -71,7 +70,6 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
 
     function checkPcrMeasurements(bytes calldata tpmQuote, MeasureablePcr[] calldata tpmPcrs)
         external
-        pure
         override
         returns (bool success, bytes memory extraData)
     {
@@ -116,6 +114,8 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         if (pcrDigest != expectedDigest) {
             return (false, bytes("PCR digest does not match expected digest"));
         }
+
+        emit TpmMeasurementChecked(keccak256(tpmQuote), pcrDigest, extraData);
 
         return (true, extraData);
     }
@@ -168,13 +168,14 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
 
     function _verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey memory akPub)
         private
-        view
         returns (bool success, string memory errMessage)
     {
         (success, errMessage) = _verifyTpmQuoteSignature(tpmQuote, tpmSignature, akPub);
         if (!success) {
             return (false, errMessage);
         }
+
+        emit TpmSignatureVerified(keccak256(tpmQuote));
 
         return (true, "");
     }
