@@ -109,7 +109,7 @@ library LibX509 {
         bytes memory key = der.bytesAt(subjectPublicKeyInfoPtr);
         (bytes memory oid,) = _getOid(key);
         if (oid.equal(hex"2a864886f70d010101")) {
-            pubkey.sigScheme = TPM_ALG_RSA;
+            pubkey.sigScheme = TPM_ALG_RSASSA;
             pubkey.curve = 0;
             pubkey.hashAlgo = TPM_ALG_SHA256;
         } else if (oid.equal(hex"2a8648ce3d0201")) {

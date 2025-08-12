@@ -40,7 +40,7 @@ library Crypto {
         }
 
         // Decode the public key based on the signature scheme
-        if (key.sigScheme == TPM_ALG_RSA) {
+        if (key.sigScheme == TPM_ALG_RSASSA) {
             (bytes memory n, bytes memory e) = RSALib.parseRsaDer(key.data);
             return RSA.pkcs1Sha256(digest, signature, e, n);
         } else if (key.sigScheme == TPM_ALG_ECDSA) {
@@ -79,7 +79,7 @@ library RSALib {
             der = abi.encodePacked(der, uint8(0x02), uint8(eLength), e);
         }
 
-        return Pubkey({sigScheme: TPM_ALG_RSA, curve: 0, hashAlgo: TPM_ALG_SHA256, data: der});
+        return Pubkey({sigScheme: TPM_ALG_RSASSA, curve: 0, hashAlgo: TPM_ALG_SHA256, data: der});
     }
 
     function parseRsaDer(bytes memory der) internal pure returns (bytes memory n, bytes memory e) {

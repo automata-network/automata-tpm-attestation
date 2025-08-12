@@ -8,7 +8,7 @@ import {RSA} from "@openzeppelin/contracts/utils/cryptography/RSA.sol";
 import {ICertChainRegistry} from "../interfaces/ICertChainRegistry.sol";
 import {LibX509} from "../lib/LibX509.sol";
 import {Pubkey} from "../types/Crypto.sol";
-import {TPM_ALG_RSA, TPM_ALG_ECDSA} from "../types/Constants.sol";
+import {TPM_ALG_RSASSA, TPM_ALG_ECDSA} from "../types/Constants.sol";
 
 abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     using LibX509 for bytes;

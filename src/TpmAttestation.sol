@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 import {ITpmAttestation, MeasureablePcr, Pcr} from "./interfaces/ITpmAttestation.sol";
 import {Pubkey, Crypto} from "./types/Crypto.sol";
-import {TPM_ALG_SHA256, TPM_ALG_RSA, TPM_ALG_ECDSA, TPM_ECC_NIST_P256} from "./types/Constants.sol";
+import {TPM_ALG_SHA256, TPM_ALG_RSASSA, TPM_ALG_ECDSA, TPM_ECC_NIST_P256} from "./types/Constants.sol";
 import {LibX509, CertChainRegistry} from "./bases/CertChainRegistry.sol";
 
 // TPM Quote Layout:
@@ -188,7 +188,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         }
 
         bytes memory sig;
-        if (sigAlg == TPM_ALG_RSA) {
+        if (sigAlg == TPM_ALG_RSASSA) {
             sig = tpmSignature[6:6 + sigSize];
         } else if (sigAlg == TPM_ALG_ECDSA) {
             if (sigSize != 32) {
