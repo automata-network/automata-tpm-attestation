@@ -2,6 +2,15 @@
 // Automata Contracts
 pragma solidity ^0.8.0;
 
+/**
+ * @title Measureable PCR Object
+ * @notice This object contains the PCR value, and a list of event traces that
+ * can be extended to compute the PCR value.
+ * @notice This object also contains a list of log indices to select a sub-set of (or all) events
+ * to be included in the final measurement.
+ * @notice Generally, when the event indices are provided, the final PCR value
+ * to include for measurement should be zero.
+ */
 struct MeasureablePcr {
     // pcr index
     uint256 index;
@@ -14,7 +23,11 @@ struct MeasureablePcr {
     bool measurePcr;
 }
 
-/// PCR Golden Measurement
+/**
+ * @title PCR Object
+ * @notice This object represents the intended measurement of a PCR.
+ * @notice Applications often use this object to define its golden measurement.
+ */
 struct Pcr {
     // pcr index
     uint256 index;
@@ -27,7 +40,7 @@ struct Pcr {
     uint256[] measureEventsIdx;
 }
 
-import {ICertChainRegistry, CertPubkey} from "./ICertChainRegistry.sol";
+import {ICertChainRegistry, Pubkey} from "./ICertChainRegistry.sol";
 
 /**
  * @title Trusted Platform Module (TPM) Onchain Attestation Interface
@@ -56,7 +69,7 @@ interface ITpmAttestation is ICertChainRegistry {
      * @return success - Whether the verification was successful
      * @return errorMessage - An error message if the verification failed
      */
-    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey calldata akPub)
+    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey calldata akPub)
         external
         returns (bool, string memory);
 
@@ -81,9 +94,9 @@ interface ITpmAttestation is ICertChainRegistry {
         returns (bool, bytes memory);
 
     /**
-     * @notice Converts the PCR measurements to a golden measurement format
+     * @notice Converts Measurable PCRs to the final PCR Measurement format
      * @param tpmPcrs - The PCR measurements to convert
-     * @return pcrs - The converted PCR measurements in golden measurement format
+     * @return pcrs - The final PCR measurement format
      */
-    function toGoldenMeasurement(MeasureablePcr[] calldata tpmPcrs) external returns (Pcr[] memory);
+    function toFinalMeasurement(MeasureablePcr[] calldata tpmPcrs) external returns (Pcr[] memory);
 }
