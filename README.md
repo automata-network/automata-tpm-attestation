@@ -54,7 +54,7 @@ struct MeasureablePcr {
     bool measurePcr;        // Whether to include PCR value
 }
 
-// Golden measurement format for validation
+// Final measurement format for validation
 struct Pcr {
     uint256 index;          // PCR index
     bytes32 pcr;           // Expected PCR value (0 if not measured)
@@ -188,6 +188,9 @@ function verifyTpmQuote(
 
 Extracts user data embedded in the TPM quote.
 
+> [!NOTE]
+> You may also call the `checkPcrMeasurements()` method directly to get the extra data as a return value upon successful PCR check.
+
 ```solidity
 function extractExtraData(bytes calldata tpmQuote) 
     external pure returns (bool success, bytes memory extraData);
@@ -207,7 +210,7 @@ if (success) {
 Validates PCR measurements against the TPM quote.
 
 > [!NOTE]
-> PCR Digest currently only supports SHA256 hash (`HASH_SHA256 = 0x000B`).
+> PCR Digest currently only supports SHA256 hash (`TPM_ALG_SHA256 = 0x000B`).
 
 ```solidity
 function checkPcrMeasurements(
@@ -235,14 +238,16 @@ expectedPcrs[0] = MeasureablePcr({
 require(success, "PCR validation failed");
 ```
 
-#### `toGoldenMeasurement(MeasureablePcr[] tpmPcrs)`
+#### `toFinalMeasurement(MeasureablePcr[] tpmPcrs)`
 
-Converts PCR measurements to golden measurement format.
+Converts PCR measurements to final measurement format.
 
 ```solidity
-function toGoldenMeasurement(MeasureablePcr[] calldata tpmPcrs) 
+function toFinalMeasurement(MeasureablePcr[] calldata tpmPcrs) 
     external pure returns (Pcr[] memory);
 ```
+> [!NOTE]
+> The final measurement format of the PCR object can be used for reference as a **Golden Measurement** for CVM Workloads that are built specifically for the intended application.
 
 ### Certificate Management (Inherited from CertChainRegistry)
 
