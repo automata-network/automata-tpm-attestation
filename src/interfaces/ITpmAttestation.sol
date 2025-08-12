@@ -8,7 +8,7 @@ pragma solidity ^0.8.0;
  * can be extended to compute the PCR value.
  * @notice This object also contains a list of log indices to select a sub-set of (or all) events
  * to be included in the final measurement.
- * @notice Generally, when the event indices are provided, the final PCR value 
+ * @notice Generally, when the event indices are provided, the final PCR value
  * to include for measurement should be zero.
  */
 struct MeasureablePcr {

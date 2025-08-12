@@ -6,11 +6,13 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {RSA} from "@openzeppelin/contracts/utils/cryptography/RSA.sol";
 
 import {ICertChainRegistry} from "../interfaces/ICertChainRegistry.sol";
-import {Pubkey} from "../types/Crypto.sol";
 import {LibX509} from "../lib/LibX509.sol";
-import "../types/Constants.sol";
+import {Pubkey} from "../types/Crypto.sol";
+import {TPM_ALG_RSA, TPM_ALG_ECDSA} from "../types/Constants.sol";
 
 abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
+    using LibX509 for bytes;
+
     enum CertType {
         None, // 0
         CA, // 1
@@ -34,7 +36,8 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
             revert("cert expired");
         }
         Pubkey memory issuer = LibX509.getPubkey(ca);
-        bool result = verifySignature(sha256(LibX509.getCertTbs(ca)), LibX509.getCertSignature(ca), issuer);
+        address verifier = issuer.sigScheme == TPM_ALG_ECDSA ? p256 : address(0);
+        bool result = issuer.verifySignature(ca.getCertTbs(), ca.getCertSignature(), verifier);
         require(result, "verify sig failed");
         verifiedCertIssuers[key] = CertType.CA;
         emit AddCA(ca);
@@ -51,7 +54,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     function verifyCertChain(bytes[] calldata certs) public override returns (Pubkey memory) {
         require(certs.length > 0, "CertChainRegistry: empty certs");
         Pubkey[] memory issuers = new Pubkey[](certs.length);
-        bytes32[] memory certHashes = LibX509._getCertHashes(certs);
+        bytes32[] memory certHashes = LibX509.getCertHashes(certs);
         require(certs.length < 5, "CertChainRegistry: too many certs");
         uint256 verified = type(uint256).max;
         uint256 certLen = certs.length;
@@ -83,12 +86,9 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
 
         for (uint256 i = 0; i < verified; i++) {
             bytes memory sig = LibX509.getCertSignature(certs[i]);
-            if (issuers[i + 1].sigScheme == TPM_ALG_RSA) {
-                bool result = verifySignature(sha256(LibX509.getCertTbs(certs[i])), sig, issuers[i + 1]);
-                require(result, "verify sig failed");
-            } else {
-                revert("CertChainRegistry: unsupported EC");
-            }
+            address verifier = issuers[i + 1].sigScheme == TPM_ALG_ECDSA ? p256 : address(0);
+            bool result = issuers[i + 1].verifySignature(LibX509.getCertTbs(certs[i]), sig, verifier);
+            require(result, "verify sig failed");
         }
 
         // cache result
@@ -96,43 +96,5 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
             verifiedCertIssuers[certHashes[i]] = CertType.Intermediate;
         }
         return issuers[0];
-    }
-
-    function verifySignature(bytes32 digest, bytes memory sig, Pubkey memory pubkey)
-        public
-        view
-        override
-        returns (bool)
-    {
-        if (pubkey.sigScheme == TPM_ALG_RSA) {
-            (bytes memory n, bytes memory e) = LibX509.rsaPub(pubkey.data);
-            bool result = RSA.pkcs1Sha256(digest, sig, e, n);
-            return result;
-        } else if (pubkey.sigScheme == TPM_ALG_ECDSA && pubkey.curve == TPM_ECC_NIST_P256) {
-            require(sig.length == 64, "invalid r size");
-            bytes32 r;
-            bytes32 s;
-            assembly {
-                let offset := add(sig, 0x20) // length
-                r := mload(offset)
-                offset := add(offset, 0x20)
-                s := mload(offset)
-            }
-            (bytes32 x, bytes32 y) = LibX509.ec(pubkey);
-            return _ecdsaVerify(digest, r, s, x, y);
-        } else {
-            revert("CertChainRegistry: unsupported pubkey algo");
-        }
-    }
-
-    function _ecdsaVerify(bytes32 messageHash, bytes32 r, bytes32 s, bytes32 x, bytes32 y)
-        private
-        view
-        returns (bool verified)
-    {
-        bytes memory args = abi.encode(messageHash, r, s, x, y);
-        (bool success, bytes memory ret) = p256.staticcall(args);
-        assert(success); // never reverts, always returns 0 or 1
-        verified = abi.decode(ret, (uint256)) == 1;
     }
 }

@@ -3,7 +3,8 @@
 pragma solidity ^0.8.20;
 
 import {ITpmAttestation, MeasureablePcr, Pcr} from "./interfaces/ITpmAttestation.sol";
-import {Pubkey} from "./types/Crypto.sol";
+import {Pubkey, Crypto} from "./types/Crypto.sol";
+import {TPM_ALG_SHA256, TPM_ALG_RSA, TPM_ALG_ECDSA, TPM_ECC_NIST_P256} from "./types/Constants.sol";
 import {LibX509, CertChainRegistry} from "./bases/CertChainRegistry.sol";
 
 // TPM Quote Layout:
@@ -31,10 +32,6 @@ import {LibX509, CertChainRegistry} from "./bases/CertChainRegistry.sol";
 // END
 
 contract TpmAttestation is CertChainRegistry, ITpmAttestation {
-    uint16 internal constant HASH_SHA256 = 0x000B;
-    uint16 internal constant SIG_RSA = 0x0014;
-    uint16 internal constant SIG_ECDSA = 0x0018;
-
     constructor(address _intitialOwner, address _p256) CertChainRegistry(_intitialOwner, _p256) {}
 
     function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, bytes[] calldata akCertchain)
@@ -91,7 +88,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         offset += 4;
 
         uint16 tpmPcrHash = uint16(bytes2(tpmQuote[offset:offset + 2]));
-        if (tpmPcrHash != HASH_SHA256) {
+        if (tpmPcrHash != TPM_ALG_SHA256) {
             return (false, bytes("TPM PCR hash is not SHA256"));
         }
         offset += 2;
@@ -186,14 +183,14 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         uint16 hashAlg = uint16(bytes2(tpmSignature[2:4]));
         uint16 sigSize = uint16(bytes2(tpmSignature[4:6]));
 
-        if (hashAlg != HASH_SHA256) {
+        if (hashAlg != TPM_ALG_SHA256) {
             return (false, "hash is not SHA256");
         }
 
         bytes memory sig;
-        if (sigAlg == SIG_RSA) {
+        if (sigAlg == TPM_ALG_RSA) {
             sig = tpmSignature[6:6 + sigSize];
-        } else if (sigAlg == SIG_ECDSA) {
+        } else if (sigAlg == TPM_ALG_ECDSA) {
             if (sigSize != 32) {
                 return (false, "Incorrect ECDSA r-value size");
             }
@@ -210,8 +207,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
             return (false, "Unknown sigAlg");
         }
 
-        bytes32 message = sha256(tpmQuote);
-        bool result = verifySignature(message, sig, akPub);
+        bool result = akPub.verifySignature(tpmQuote, sig, address(0));
 
         if (!result) {
             return (false, "Failed to verify TPM signature");
