@@ -2,7 +2,7 @@
 // Automata Contracts
 pragma solidity ^0.8.0;
 
-import {CertPubkey} from "../lib/LibX509.sol";
+import {Pubkey} from "../types/Crypto.sol";
 
 /**
  * @title Certificate Chain Registry Interface
@@ -31,7 +31,7 @@ interface ICertChainRegistry {
      * @param certs - An array of X509 certificates in DER format.
      * @return the public key of the leaf certificate
      */
-    function verifyCertChain(bytes[] calldata certs) external returns (CertPubkey memory);
+    function verifyCertChain(bytes[] calldata certs) external returns (Pubkey memory);
 
     /**
      * @notice Verifies a digital signature
@@ -39,5 +39,5 @@ interface ICertChainRegistry {
      * @param sig - The digital signature
      * @param pubkey - The public key of the signer
      */
-    function verifySignature(bytes32 digest, bytes memory sig, CertPubkey memory pubkey) external view returns (bool);
+    function verifySignature(bytes32 digest, bytes memory sig, Pubkey memory pubkey) external view returns (bool);
 }

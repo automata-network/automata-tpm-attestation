@@ -27,7 +27,7 @@ struct Pcr {
     uint256[] measureEventsIdx;
 }
 
-import {ICertChainRegistry, CertPubkey} from "./ICertChainRegistry.sol";
+import {ICertChainRegistry, Pubkey} from "./ICertChainRegistry.sol";
 
 /**
  * @title Trusted Platform Module (TPM) Onchain Attestation Interface
@@ -56,7 +56,7 @@ interface ITpmAttestation is ICertChainRegistry {
      * @return success - Whether the verification was successful
      * @return errorMessage - An error message if the verification failed
      */
-    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey calldata akPub)
+    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey calldata akPub)
         external
         returns (bool, string memory);
 

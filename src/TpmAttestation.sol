@@ -3,7 +3,8 @@
 pragma solidity ^0.8.20;
 
 import {ITpmAttestation, MeasureablePcr, Pcr} from "./interfaces/ITpmAttestation.sol";
-import {LibX509, CertPubkey, CertChainRegistry} from "./bases/CertChainRegistry.sol";
+import {Pubkey} from "./types/Crypto.sol";
+import {LibX509, CertChainRegistry} from "./bases/CertChainRegistry.sol";
 
 // TPM Quote Layout:
 // =====================================
@@ -41,14 +42,14 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         override
         returns (bool, string memory)
     {
-        CertPubkey memory akPub = verifyCertChain(akCertchain);
+        Pubkey memory akPub = verifyCertChain(akCertchain);
         if (akPub.data.length == 0) {
             return (false, "Invalid AK certificate chain");
         }
         return _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
     }
 
-    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey calldata akPub)
+    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey calldata akPub)
         external
         view
         override
@@ -163,7 +164,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         return pcrs;
     }
 
-    function _verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub)
+    function _verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey memory akPub)
         private
         view
         returns (bool success, string memory errMessage)
@@ -176,7 +177,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         return (true, "");
     }
 
-    function _verifyTpmQuoteSignature(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub)
+    function _verifyTpmQuoteSignature(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey memory akPub)
         private
         view
         returns (bool, string memory)

@@ -6,22 +6,15 @@ import {Asn1Decode, NodePtr} from "./Asn1Decode.sol";
 import {LibBytes} from "./LibBytes.sol";
 import {DateTimeLib} from "@solady/utils/DateTimeLib.sol";
 
-uint8 constant ALGO_EC = 1;
-uint8 constant ALGO_RSA = 2;
-
-struct CertPubkey {
-    uint8 algo;
-    bytes data;
-}
-
-using LibX509 for CertPubkey global;
+import "../types/Constants.sol";
+import "../types/Crypto.sol";
 
 library LibX509 {
     using Asn1Decode for bytes;
     using NodePtr for uint256;
     using LibBytes for bytes;
 
-    function newRsaPubkey(bytes memory e, bytes memory n) internal pure returns (CertPubkey memory) {
+    function newRsaPubkey(bytes memory e, bytes memory n) internal pure returns (Pubkey memory) {
         // RSAPublicKey ::= SEQ { n, e }
         uint256 nLength = n[0] < 0x80 ? n.length : n.length + 1;
         uint256 eLength = e[0] < 0x80 ? e.length : e.length + 1;
@@ -39,20 +32,20 @@ library LibX509 {
             der = abi.encodePacked(der, uint8(0x02), uint8(eLength), e);
         }
 
-        return CertPubkey({algo: ALGO_RSA, data: der});
+        return Pubkey({sigScheme: TPM_ALG_RSA, curve: 0, hashAlgo: TPM_ALG_SHA256, data: der});
     }
 
-    function empty(CertPubkey memory pubkey) internal pure returns (bool) {
+    function empty(Pubkey memory pubkey) internal pure returns (bool) {
         return pubkey.data.length == 0;
     }
 
-    function ec(CertPubkey memory pubkey) internal pure returns (bytes32, bytes32) {
+    function ec(Pubkey memory pubkey) internal pure returns (bytes32, bytes32) {
         bytes memory data = pubkey.data;
         bytes32 x;
         bytes32 y;
         assembly {
-            x := mload(add(data, 0x21))
-            y := mload(add(data, 0x41))
+            x := mload(add(data, 0x20))
+            y := mload(add(data, 0x40))
         }
         return (x, y);
     }
@@ -60,21 +53,25 @@ library LibX509 {
     function _getSubjectPublicKey(bytes memory der, uint256 subjectPublicKeyInfoPtr)
         private
         pure
-        returns (CertPubkey memory pubkey)
+        returns (Pubkey memory pubkey)
     {
         bytes memory key = der.bytesAt(subjectPublicKeyInfoPtr);
         (bytes memory oid,) = _getOid(key);
         if (oid.equal(hex"2a864886f70d010101")) {
-            pubkey.algo = ALGO_RSA;
+            pubkey.sigScheme = TPM_ALG_RSA;
+            pubkey.curve = 0;
+            pubkey.hashAlgo = TPM_ALG_SHA256;
         } else if (oid.equal(hex"2a8648ce3d0201")) {
-            pubkey.algo = ALGO_EC;
+            pubkey.sigScheme = TPM_ALG_ECDSA;
+            pubkey.curve = TPM_ECC_NIST_P256;
+            pubkey.hashAlgo = TPM_ALG_SHA256;
         } else {
             revert("unknown pubkey algo");
         }
 
         subjectPublicKeyInfoPtr = der.nextSiblingOf(subjectPublicKeyInfoPtr);
         pubkey.data = der.bitstringAt(subjectPublicKeyInfoPtr);
-        if (pubkey.algo == ALGO_EC) {
+        if (pubkey.sigScheme == TPM_ALG_ECDSA && pubkey.curve == TPM_ECC_NIST_P256) {
             if (pubkey.data.length != 65 || pubkey.data[0] != 0x04) {
                 revert("compressed public key not supported");
             }
@@ -153,7 +150,7 @@ library LibX509 {
         (validityNotBefore, validityNotAfter) = _getValidity(der, tbsPtr);
     }
 
-    function getPubkey(bytes calldata der) internal pure returns (CertPubkey memory) {
+    function getPubkey(bytes calldata der) internal pure returns (Pubkey memory) {
         uint256 root = der.root();
         uint256 tbsParentPtr = der.firstChildOf(root);
         uint256 tbsPtr = der.firstChildOf(tbsParentPtr);
@@ -163,7 +160,7 @@ library LibX509 {
         tbsPtr = der.nextSiblingOf(tbsPtr);
         tbsPtr = der.nextSiblingOf(tbsPtr);
         tbsPtr = der.nextSiblingOf(tbsPtr);
-        CertPubkey memory subjectPublicKey = _getSubjectPublicKey(der, der.firstChildOf(tbsPtr));
+        Pubkey memory subjectPublicKey = _getSubjectPublicKey(der, der.firstChildOf(tbsPtr));
         return subjectPublicKey;
     }
 

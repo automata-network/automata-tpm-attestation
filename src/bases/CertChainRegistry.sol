@@ -3,9 +3,12 @@
 pragma solidity ^0.8.20;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {ICertChainRegistry} from "../interfaces/ICertChainRegistry.sol";
-import {CertPubkey, LibX509, ALGO_RSA, ALGO_EC} from "../lib/LibX509.sol";
 import {RSA} from "@openzeppelin/contracts/utils/cryptography/RSA.sol";
+
+import {ICertChainRegistry} from "../interfaces/ICertChainRegistry.sol";
+import {Pubkey} from "../types/Crypto.sol";
+import {LibX509} from "../lib/LibX509.sol";
+import "../types/Constants.sol";
 
 abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     enum CertType {
@@ -30,7 +33,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         if (block.timestamp > validityNotAfter) {
             revert("cert expired");
         }
-        CertPubkey memory issuer = LibX509.getPubkey(ca);
+        Pubkey memory issuer = LibX509.getPubkey(ca);
         bool result = verifySignature(sha256(LibX509.getCertTbs(ca)), LibX509.getCertSignature(ca), issuer);
         require(result, "verify sig failed");
         verifiedCertIssuers[key] = CertType.CA;
@@ -45,9 +48,9 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     }
 
     // certs order: leaf, intermediate, root
-    function verifyCertChain(bytes[] calldata certs) public override returns (CertPubkey memory) {
+    function verifyCertChain(bytes[] calldata certs) public override returns (Pubkey memory) {
         require(certs.length > 0, "CertChainRegistry: empty certs");
-        CertPubkey[] memory issuers = new CertPubkey[](certs.length);
+        Pubkey[] memory issuers = new Pubkey[](certs.length);
         bytes32[] memory certHashes = LibX509._getCertHashes(certs);
         require(certs.length < 5, "CertChainRegistry: too many certs");
         uint256 verified = type(uint256).max;
@@ -80,7 +83,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
 
         for (uint256 i = 0; i < verified; i++) {
             bytes memory sig = LibX509.getCertSignature(certs[i]);
-            if (issuers[i + 1].algo == ALGO_RSA) {
+            if (issuers[i + 1].sigScheme == TPM_ALG_RSA) {
                 bool result = verifySignature(sha256(LibX509.getCertTbs(certs[i])), sig, issuers[i + 1]);
                 require(result, "verify sig failed");
             } else {
@@ -95,17 +98,17 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         return issuers[0];
     }
 
-    function verifySignature(bytes32 digest, bytes memory sig, CertPubkey memory pubkey)
+    function verifySignature(bytes32 digest, bytes memory sig, Pubkey memory pubkey)
         public
         view
         override
         returns (bool)
     {
-        if (pubkey.algo == ALGO_RSA) {
+        if (pubkey.sigScheme == TPM_ALG_RSA) {
             (bytes memory n, bytes memory e) = LibX509.rsaPub(pubkey.data);
             bool result = RSA.pkcs1Sha256(digest, sig, e, n);
             return result;
-        } else if (pubkey.algo == ALGO_EC) {
+        } else if (pubkey.sigScheme == TPM_ALG_ECDSA && pubkey.curve == TPM_ECC_NIST_P256) {
             require(sig.length == 64, "invalid r size");
             bytes32 r;
             bytes32 s;
@@ -115,7 +118,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
                 offset := add(offset, 0x20)
                 s := mload(offset)
             }
-            (bytes32 x, bytes32 y) = pubkey.ec();
+            (bytes32 x, bytes32 y) = LibX509.ec(pubkey);
             return _ecdsaVerify(digest, r, s, x, y);
         } else {
             revert("CertChainRegistry: unsupported pubkey algo");
