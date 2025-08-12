@@ -118,7 +118,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         return (true, extraData);
     }
 
-    function toGoldenMeasurement(MeasureablePcr[] calldata mpcrs) external pure override returns (Pcr[] memory) {
+    function toFinalMeasurement(MeasureablePcr[] calldata mpcrs) external pure override returns (Pcr[] memory) {
         // Cache array length to avoid multiple storage reads
         uint256 mpcrsLength = mpcrs.length;
         Pcr[] memory pcrs = new Pcr[](mpcrsLength);
