@@ -125,6 +125,8 @@ library LibX509 {
         if (pubkey.sigScheme == TPM_ALG_ECDSA && pubkey.curve == TPM_ECC_NIST_P256) {
             if (pubkey.data.length != 65 || pubkey.data[0] != 0x04) {
                 revert("compressed public key not supported");
+            } else {
+                pubkey.data = pubkey.data.slice(1, 64); // remove 0x04 prefix
             }
         }
     }

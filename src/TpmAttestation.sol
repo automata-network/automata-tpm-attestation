@@ -207,7 +207,8 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
             return (false, "Unknown sigAlg");
         }
 
-        bool result = akPub.verifySignature(tpmQuote, sig, address(0));
+        address verifier = sigAlg == TPM_ALG_ECDSA ? p256 : address(0);
+        bool result = akPub.verifySignature(tpmQuote, sig, verifier);
 
         if (!result) {
             return (false, "Failed to verify TPM signature");
