@@ -13,6 +13,11 @@ interface ICertChainRegistry {
     event RemoveCA(bytes ca);
 
     /**
+     * @notice Returns the address of the P256 Verifier that the contract uses
+     */
+    function p256() external view returns (address);
+
+    /**
      * @notice Adds a Certificate Authority (CA) to the registry.
      * @param ca - The X509 Certificate Authority (CA) in DER format.
      * @dev should implement access-control

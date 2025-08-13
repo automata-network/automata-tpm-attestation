@@ -20,7 +20,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
 
     }
 
-    address public immutable p256;
+    address public immutable override p256;
 
     // keccak256(cert) => type: 0) none, 1) CA; 2) leaf
     mapping(bytes32 => CertType) public verifiedCertIssuers;
