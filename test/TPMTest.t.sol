@@ -49,9 +49,9 @@ contract TPMTest is SetupBase {
         certChain[0] = TPM_AK_CERT_CHAIN_0;
         certChain[1] = TPM_AK_CERT_CHAIN_1;
         certChain[2] = TPM_AK_CERT_CHAIN_2;
-        (bool success, string memory errorMessage) =
+        (bool success, bytes memory errorMessage) =
             tpmAttestation.verifyTpmQuote(TPM_NIST_P256_QUOTE, TPM_NIST_P256_SIGNATURE, certChain);
 
-        assertTrue(success, errorMessage);
+        assertTrue(success, string(errorMessage));
     }
 }

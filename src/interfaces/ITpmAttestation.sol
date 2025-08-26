@@ -49,20 +49,20 @@ import {ICertChainRegistry, Pubkey} from "./ICertChainRegistry.sol";
  */
 interface ITpmAttestation is ICertChainRegistry {
     /**
-     * @notice Verifies a TPM quote
+     * @notice Verifies a TPM quote using the attestation key certificate chain
      * @param tpmQuote - The TPM quote to verify
      * @param tpmSignature - The signature of the TPM quote
      * @param akCertchain - The attestation key certificate chain
      * @return success - Whether the verification was successful
-     * @return errorMessage - An error message if the verification failed
+     * @return akPubkey - The Attestation Key abi-encoded in Pubkey type; otherwise the raw bytes of error message
      */
     function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, bytes[] calldata akCertchain)
         external
-        returns (bool, string memory);
+        returns (bool, bytes memory);
 
     /**
      * @notice Verifies a TPM quote using pre-verified / trusted public AK
-     * @dev is responsible for ensuring akPub is valid (saves gas from verifying the entire cert chain)
+     * @dev is responsible for ensuring akPub is trusted (saves gas from verifying the entire cert chain)
      * @param tpmQuote - The TPM quote to verify
      * @param tpmSignature - The signature of the TPM quote
      * @param akPub - A pre-verified attestation public key

@@ -37,13 +37,18 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
     function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, bytes[] calldata akCertchain)
         external
         override
-        returns (bool, string memory)
+        returns (bool, bytes memory)
     {
         Pubkey memory akPub = verifyCertChain(akCertchain);
         if (akPub.data.length == 0) {
-            return (false, "Invalid AK certificate chain");
+            return (false, bytes("Invalid AK certificate chain"));
         }
-        return _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
+        (bool success, string memory errorMessage) = _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
+        if (!success) {
+            return (false, bytes(errorMessage));
+        } else {
+            return (true, abi.encode(akPub));
+        }
     }
 
     function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey calldata akPub)
