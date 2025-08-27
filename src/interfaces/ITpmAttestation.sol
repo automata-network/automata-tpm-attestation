@@ -71,6 +71,7 @@ interface ITpmAttestation is ICertChainRegistry {
      */
     function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey calldata akPub)
         external
+        view
         returns (bool, string memory);
 
     /**
@@ -91,6 +92,7 @@ interface ITpmAttestation is ICertChainRegistry {
      */
     function checkPcrMeasurements(bytes calldata tpmQuote, MeasureablePcr[] calldata tpmPcrs)
         external
+        pure
         returns (bool, bytes memory);
 
     /**
@@ -98,5 +100,5 @@ interface ITpmAttestation is ICertChainRegistry {
      * @param tpmPcrs - The PCR measurements to convert
      * @return pcrs - The final PCR measurement format
      */
-    function toFinalMeasurement(MeasureablePcr[] calldata tpmPcrs) external returns (Pcr[] memory);
+    function toFinalMeasurement(MeasureablePcr[] calldata tpmPcrs) external pure returns (Pcr[] memory);
 }
