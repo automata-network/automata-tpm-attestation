@@ -28,7 +28,7 @@ contract TPMTest is SetupBase {
         super.setUp();
     }
 
-    function testTpmRsa() public view {
+    function testTpmRsa() public {
         Pubkey memory pubkey = RSALib.newRsaPubkey(TPM_RSA_KEY_E, TPM_RSA_KEY_N);
 
         (bool success, string memory errorMessage) =
