@@ -272,7 +272,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
             // A PCR value of zero is valid if events are provided to reconstruct it.
             // If no events are provided, the PCR value must not be zero.
             if (pcrValue == bytes32(0)) {
-                require(tpmPcrs[i].allEvents.length > 0, "TPMA: PCR is zero without events");
+                require(!tpmPcrs[i].measurePcr || tpmPcrs[i].allEvents.length > 0, "TPMA: PCR is zero without events");
                 pcrValue = _calculatePcrFromEvents(tpmPcrs[i].allEvents);
             }
             concatenated = abi.encodePacked(concatenated, pcrValue);
