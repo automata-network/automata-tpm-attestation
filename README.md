@@ -144,30 +144,36 @@ tpmAttestation.removeCA(caCert);
 
 #### `verifyTpmQuote(bytes tpmQuote, bytes tpmSignature, bytes[] akCertchain)`
 
-Verifies a TPM quote with full certificate chain validation.
+Verifies a TPM quote with full certificate chain validation. Upon successful verification, this method returns the ABI encoded TPM Attestation Key.
 
 ```solidity
 function verifyTpmQuote(
     bytes calldata tpmQuote,      // TPM quote data
     bytes calldata tpmSignature,  // TPM signature
     bytes[] calldata akCertchain  // AK certificate chain [leaf, intermediate, root]
-) external returns (bool success, string memory errorMessage);
+) external returns (bool success, bytes memory encodedAkPub);
 ```
 
 **Example:**
+
 ```solidity
+import {Pubkey} from "@automata-network/automata-tpm-attestation/types/Crypto.sol";
+
 bytes[] memory certChain = new bytes[](3);
 certChain[0] = akLeafCert;
 certChain[1] = intermediateCert;
 certChain[2] = rootCaCert;
 
-(bool success, string memory error) = tpmAttestation.verifyTpmQuote(
+(bool success, bytes memory encodedAkPub) = tpmAttestation.verifyTpmQuote(
     tpmQuote,
     tpmSignature,
     certChain
 );
 
-require(success, error);
+require(success, "Failed to verify TPM Quote");
+
+// Deocde the key
+Pubkey memory ak = abi.decode(encodedAkPub, (Pubkey));
 ```
 
 #### `verifyTpmQuote(bytes tpmQuote, bytes tpmSignature, CertPubkey akPub)`
@@ -236,6 +242,8 @@ expectedPcrs[0] = MeasureablePcr({
 );
 
 require(success, "PCR validation failed");
+
+// At this point, you might want to check whether the extracted userData matches with the intended value.
 ```
 
 #### `toFinalMeasurement(MeasureablePcr[] tpmPcrs)`
@@ -286,12 +294,12 @@ contract MyApplication {
         MeasureablePcr[] calldata expectedPcrs
     ) external {
         // 1. Verify TPM quote and certificate chain
-        (bool quoteValid, string memory quoteError) = tpmAttestation.verifyTpmQuote(
+        (bool quoteValid, bytes memory encodedAkPub) = tpmAttestation.verifyTpmQuote(
             tpmQuote,
             tpmSignature,
             akCertchain
         );
-        require(quoteValid, quoteError);
+        require(quoteValid, "Invalid TPM Quote");
         
         // 2. Validate PCR measurements
         (bool pcrValid, bytes memory userData) = tpmAttestation.checkPcrMeasurements(
