@@ -3,6 +3,7 @@
 pragma solidity ^0.8.15;
 
 import "./Constants.sol";
+import "./Errors.sol";
 import {Asn1Decode} from "../lib/Asn1Decode.sol";
 import {LibBytes} from "../lib/LibBytes.sol";
 
@@ -36,7 +37,7 @@ library Crypto {
         if (key.hashAlgo == TPM_ALG_SHA256) {
             digest = sha256(message);
         } else {
-            revert("Crypto: unsupported hash algorithm");
+            revert UnsupportedHashAlgorithm();
         }
 
         // Decode the public key based on the signature scheme
@@ -49,10 +50,10 @@ library Crypto {
                 (bytes32 x, bytes32 y) = key.ec();
                 return P256Lib.ecdsaVerify(externalVerifier, digest, r, s, x, y);
             } else {
-                revert("Crypto: unsupported EC");
+                revert UnknownPublicKeyAlgorithm();
             }
         } else {
-            revert("Crypto: unsupported signature scheme");
+            revert UnknownPublicKeyAlgorithm();
         }
     }
 }
@@ -98,6 +99,9 @@ library RSALib {
             }
         }
         e = der.bytesAt(next);
+        if (n.length < 256) {
+            revert RsaKeyModulusTooSmall();
+        }
     }
 }
 
@@ -106,19 +110,23 @@ library P256Lib {
     /// @dev P256 Pubkey currently does not support compressed format
     function ec(Pubkey memory pubkey) internal pure returns (bytes32 x, bytes32 y) {
         if (pubkey.sigScheme == TPM_ALG_ECDSA && pubkey.curve == TPM_ECC_NIST_P256) {
-            require(pubkey.data.length == 64, "Crypto: invalid P256 pubkey length");
+            if (pubkey.data.length != 64) {
+                revert InvalidP256PublicKeyLength();
+            }
             bytes memory data = pubkey.data;
             assembly {
                 x := mload(add(data, 0x20))
                 y := mload(add(data, 0x40))
             }
         } else {
-            revert("Crypto: not a P256 EC pubkey");
+            revert NotAP256ECPublicKey();
         }
     }
 
     function parseSignature(bytes memory signature) internal pure returns (bytes32 r, bytes32 s) {
-        require(signature.length == 64, "Crypto: invalid secp256r1 signature length");
+        if (signature.length != 64) {
+            revert InvalidEcdsaSignature();
+        }
         assembly {
             let offset := add(signature, 0x20) // length
             r := mload(offset)

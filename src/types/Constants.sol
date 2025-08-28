@@ -54,3 +54,9 @@ uint16 constant TPM_ECC_NIST_P521 = 0x0005;
 uint16 constant TPM_ECC_BN_P256 = 0x0010;
 uint16 constant TPM_ECC_BN_P638 = 0x0011;
 uint16 constant TPM_ECC_SM2_P256 = 0x0020;
+
+// X.509 Object Identifiers (OIDs)
+// https://oidref.com/2.5.29
+bytes constant OID_BASIC_CONSTRAINTS = hex"551d13";
+bytes constant OID_KEY_USAGE = hex"551d0f";
+bytes constant OID_EXTENDED_KEY_USAGE = hex"551d25";

@@ -8,6 +8,7 @@ import {DateTimeLib} from "@solady/utils/DateTimeLib.sol";
 
 import {Pubkey} from "../types/Crypto.sol";
 import "../types/Constants.sol";
+import "../types/Errors.sol";
 
 library LibX509 {
     using Asn1Decode for bytes;
@@ -59,18 +60,13 @@ library LibX509 {
 
     function getCertHashes(bytes[] memory certs) internal pure returns (bytes32[] memory certHashes) {
         uint256 certLen = certs.length;
+        if (certLen == 0) {
+            revert InvalidCertChainLength();
+        }
         certHashes = new bytes32[](certLen);
         unchecked {
-            for (uint256 i = certLen - 1; i >= 0; i--) {
-                if (i == certLen - 1) {
-                    certHashes[i] = keccak256(certs[i]);
-                } else {
-                    certHashes[i] = keccak256(abi.encodePacked(certHashes[i + 1], sha256(certs[i])));
-                }
-
-                if (i == 0) {
-                    break; // Prevent underflow
-                }
+            for (uint256 i = 0; i < certLen; i++) {
+                certHashes[i] = keccak256(certs[i]);
             }
         }
     }
@@ -117,14 +113,14 @@ library LibX509 {
             pubkey.curve = TPM_ECC_NIST_P256;
             pubkey.hashAlgo = TPM_ALG_SHA256;
         } else {
-            revert("unknown pubkey algo");
+            revert UnknownPublicKeyAlgorithm();
         }
 
         subjectPublicKeyInfoPtr = der.nextSiblingOf(subjectPublicKeyInfoPtr);
         pubkey.data = der.bitstringAt(subjectPublicKeyInfoPtr);
         if (pubkey.sigScheme == TPM_ALG_ECDSA && pubkey.curve == TPM_ECC_NIST_P256) {
             if (pubkey.data.length != 65 || pubkey.data[0] != 0x04) {
-                revert("compressed public key not supported");
+                revert CompressedPublicKeyNotSupported();
             } else {
                 pubkey.data = pubkey.data.slice(1, 64); // remove 0x04 prefix
             }
@@ -143,15 +139,19 @@ library LibX509 {
     }
 
     function _decodeSequence(bytes memory value) private pure returns (bytes memory) {
-        require(value[0] == 0x30, "Not a sequence");
+        if (value[0] != 0x30) {
+            revert InvalidArgument();
+        }
         if (value[1] == 0x80) {
-            require(false, "Not supported");
+            revert InvalidArgument();
         }
         return value.slice(2, uint256(uint8(value[1])));
     }
 
     function _getOid(bytes memory value) private pure returns (bytes memory, uint256) {
-        require(value[0] == 0x06, "Not a OID");
+        if (value[0] != 0x06) {
+            revert InvalidArgument();
+        }
         uint256 oidLen = uint256(uint8(value[1]));
         return (value.slice(2, oidLen), oidLen + 2);
     }
