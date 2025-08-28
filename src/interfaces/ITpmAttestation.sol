@@ -48,6 +48,9 @@ import {ICertChainRegistry, Pubkey} from "./ICertChainRegistry.sol";
  * @notice It extends the ICertChainRegistry to include the ability to configure trusted CA issuers for TPM Attestation Keys
  */
 interface ITpmAttestation is ICertChainRegistry {
+    event TpmSignatureVerified(bytes32 indexed tpmQuoteHash);
+    event TpmMeasurementChecked(bytes32 indexed tpmQuoteHash, bytes32 pcrDigest, bytes userData);
+
     /**
      * @notice Verifies a TPM quote using the attestation key certificate chain
      * @param tpmQuote - The TPM quote to verify
@@ -71,7 +74,6 @@ interface ITpmAttestation is ICertChainRegistry {
      */
     function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey calldata akPub)
         external
-        view
         returns (bool, string memory);
 
     /**
@@ -92,7 +94,6 @@ interface ITpmAttestation is ICertChainRegistry {
      */
     function checkPcrMeasurements(bytes calldata tpmQuote, MeasureablePcr[] calldata tpmPcrs)
         external
-        pure
         returns (bool, bytes memory);
 
     /**
