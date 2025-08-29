@@ -10,7 +10,9 @@ The `TpmAttestation` contract extends `CertChainRegistry` to provide a complete 
 
 ## Deployment Info
 
-TBD
+| Network | Contract Address |
+| --- | --- |
+| Automata Testnet | [0xE9adeC0A00c7386224604b127331fEa32977Fa71](https://explorer-testnet.ata.network/address/0xE9adeC0A00c7386224604b127331fEa32977Fa71) |
 
 ## TPM Attestation Workflow
 

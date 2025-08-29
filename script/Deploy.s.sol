@@ -18,7 +18,7 @@ contract Deploy is DeploymentConfig, P256Configuration {
         vm.stopBroadcast();
     }
 
-    function deployTpmAttestation() public broadcast {
+    function run() public broadcast {
         // deploy the TpmAttestation implementation
         TpmAttestation tpmAttestation = new TpmAttestation{salt: TPM_ATTESTATION_SALT}(owner, simulateVerify());
 
