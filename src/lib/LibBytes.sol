@@ -2,6 +2,7 @@
 pragma solidity ^0.8.15;
 
 import {LibBytes as SoladyLibBytes} from "@solady/utils/LibBytes.sol";
+import {InvalidLength} from "../types/Errors.sol";
 
 using LibBytes for Bytes48 global;
 using LibBytes for Bytes64 global;
@@ -20,6 +21,9 @@ library LibBytes {
     bytes16 private constant _SYMBOLS = "0123456789abcdef";
 
     function readBytes48(bytes memory input, uint256 offset) internal pure returns (Bytes48 memory output) {
+        if (input.length < offset + 48) {
+            revert InvalidLength(input.length, offset + 48);
+        }
         assembly {
             function store48(dest, src, off) {
                 mstore(dest, mload(add(add(src, 0x20), off)))
@@ -30,6 +34,9 @@ library LibBytes {
     }
 
     function readBytes64(bytes memory input, uint256 offset) internal pure returns (Bytes64 memory output) {
+        if (input.length < offset + 64) {
+            revert InvalidLength(input.length, offset + 64);
+        }
         assembly {
             function store64(dest, src, off) {
                 mstore(dest, mload(add(add(src, 0x20), off)))
@@ -40,24 +47,34 @@ library LibBytes {
     }
 
     function readBytes4(bytes memory input, uint256 offset) internal pure returns (bytes4 output) {
+        if (input.length < offset + 4) {
+            revert InvalidLength(input.length, offset + 4);
+        }
         assembly {
             output := mload(add(add(input, 0x20), offset))
         }
     }
 
     function readBytes32(bytes memory input, uint256 offset) internal pure returns (bytes32 output) {
+        if (input.length < offset + 32) {
+            revert InvalidLength(input.length, offset + 32);
+        }
         assembly {
             output := mload(add(add(input, 0x20), offset))
         }
     }
 
     function toBytes48(bytes memory data) internal pure returns (Bytes48 memory) {
-        require(data.length == 48, "Invalid length");
+        if (data.length != 48) {
+            revert InvalidLength(data.length, 48);
+        }
         return readBytes48(data, 0);
     }
 
     function toBytes64(bytes memory data) internal pure returns (Bytes64 memory) {
-        require(data.length == 64, "Invalid length");
+        if (data.length != 64) {
+            revert InvalidLength(data.length, 64);
+        }
         return readBytes64(data, 0);
     }
 

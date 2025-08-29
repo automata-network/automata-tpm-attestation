@@ -14,7 +14,7 @@ pragma solidity ^0.8.0;
 struct MeasureablePcr {
     // pcr index
     uint256 index;
-    // pcr value, must not be zero
+    // pcr value
     bytes32 pcr;
     // if allEvents.length > 0; extend_sha256(events) = pcr
     bytes32[] allEvents;
