@@ -13,6 +13,7 @@ The `TpmAttestation` contract extends `CertChainRegistry` to provide a complete 
 | Network | Contract Address |
 | --- | --- |
 | Automata Testnet | [0xE9adeC0A00c7386224604b127331fEa32977Fa71](https://explorer-testnet.ata.network/address/0xE9adeC0A00c7386224604b127331fEa32977Fa71) |
+| Sepolia Testnet | [0x870B920d80Bd11BA32661348A00054F19C05a069](https://sepolia.etherscan.io/address/0x870b920d80bd11ba32661348a00054f19c05a069) |
 
 ## TPM Attestation Workflow
 
