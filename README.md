@@ -24,6 +24,7 @@ A Solidity library for on-chain verification of Trusted Platform Module (TPM) at
 - [API Reference](#api-reference)
 - [Integration Guide](#integration-guide)
 - [Development \& Testing](#development--testing)
+- [Related Projects](#related-projects)
 - [Contributing](#contributing)
 - [Support](#support)
 
@@ -399,6 +400,15 @@ forge install
 forge build
 forge test
 ```
+
+## Related Projects
+
+- [DCAP Attestation](https://github.com/automata-network/automata-dcap-attestation) - On-chain verification of Intel SGX/TDX DCAP attestations
+- [TDX Attestation SDK](https://github.com/automata-network/tdx-attestation-sdk) - On-chain verification of Intel TDX attestations
+- [AMD SEV-SNP Attestation SDK](https://github.com/automata-network/amd-sev-snp-attestation-sdk) - On-chain verification of AMD SEV-SNP attestations
+- [AWS Nitro Enclave Attestation](https://github.com/automata-network/aws-nitro-enclave-attestation) - On-chain verification of AWS Nitro Enclave attestations
+- [TEE Workload Measurement](https://github.com/automata-network/tee-workload-measurement) - On-chain verification of CVM workload integrity and measurements
+- [CVM Base Image Scripts](https://github.com/automata-network/cvm-base-image/tree/main/scripts) - Scripts for building CVM base images
 
 ## Contributing
 
