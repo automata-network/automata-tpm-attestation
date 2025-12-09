@@ -1,6 +1,32 @@
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/automata-network/automata-brand-kit/main/PNG/ATA_White%20Text%20with%20Color%20Logo.png">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/automata-network/automata-brand-kit/main/PNG/ATA_Black%20Text%20with%20Color%20Logo.png">
+    <img src="https://raw.githubusercontent.com/automata-network/automata-brand-kit/main/PNG/ATA_White%20Text%20with%20Color%20Logo.png" width="50%">
+  </picture>
+</div>
+
+
 # Automata TPM Attestation
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Automata TPM Attestation](https://img.shields.io/badge/Power%20By-Automata-orange.svg)](https://github.com/automata-network)
 
 A Solidity library for on-chain verification of Trusted Platform Module (TPM) attestations, enabling secure validation of hardware-backed cryptographic proofs in smart contracts.
+
+
+## 📑 Table of Contents <!-- omit in toc -->
+- [Overview](#overview)
+- [Deployment Info](#deployment-info)
+- [TPM Attestation Workflow](#tpm-attestation-workflow)
+- [Architecture](#architecture)
+- [Installation \& Setup](#installation--setup)
+- [Configuration](#configuration)
+- [API Reference](#api-reference)
+- [Integration Guide](#integration-guide)
+- [Development \& Testing](#development--testing)
+- [Contributing](#contributing)
+- [Support](#support)
+
 
 ## Overview
 
@@ -373,10 +399,6 @@ forge install
 forge build
 forge test
 ```
-
-## Licensing
-
-This project is currently licensed under [Apache](./LICENSE).
 
 ## Contributing
 
