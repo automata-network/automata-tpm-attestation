@@ -18,7 +18,6 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         None, // 0
         CA, // 1
         Intermediate // 2
-
     }
 
     address public immutable override p256;
