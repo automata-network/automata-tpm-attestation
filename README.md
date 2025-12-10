@@ -102,10 +102,10 @@ For detailed documentation on installation, configuration, API reference, integr
 ## Related Projects
 
 - [DCAP Attestation](https://github.com/automata-network/automata-dcap-attestation) - On-chain verification of Intel SGX/TDX DCAP attestations
-- [TDX Attestation SDK](https://github.com/automata-network/tdx-attestation-sdk) - On-chain verification of Intel TDX attestations
+- [TDX Attestation SDK](https://github.com/automata-network/tdx-attestation-sdk) - TDX Development SDK to generate Intel TDX quotes from cloud providers.
 - [AMD SEV-SNP Attestation SDK](https://github.com/automata-network/amd-sev-snp-attestation-sdk) - On-chain verification of AMD SEV-SNP attestations
 - [AWS Nitro Enclave Attestation](https://github.com/automata-network/aws-nitro-enclave-attestation) - On-chain verification of AWS Nitro Enclave attestations
-- [TEE Workload Measurement](https://github.com/automata-network/tee-workload-measurement) - On-chain verification of CVM workload integrity and measurements
+- [TEE Workload Measurement](https://github.com/automata-network/tee-workload-measurement) - On-chain verification of CVM workload integrity and CVM identity management
 - [CVM Base Image](https://github.com/automata-network/cvm-base-image) - Tools for deploying Confidential VMs with workloads on GCP, AWS, and Azure
 
 ## Contributing
