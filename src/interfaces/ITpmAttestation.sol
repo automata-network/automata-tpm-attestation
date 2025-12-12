@@ -10,6 +10,7 @@ pragma solidity ^0.8.0;
  * to be included in the final measurement.
  * @notice Generally, when the event indices are provided, the final PCR value
  * to include for measurement should be zero.
+ * @custom:security-contact security@ata.network
  */
 struct MeasureablePcr {
     // pcr index
@@ -40,12 +41,32 @@ struct Pcr {
     uint256[] measureEventsIdx;
 }
 
-import {ICertChainRegistry, Pubkey} from "./ICertChainRegistry.sol";
+import { ICertChainRegistry, CertPubkey } from "./ICertChainRegistry.sol";
+
+/**
+ * @title TPMS_CLOCK_INFO structure from TPM quote
+ * @notice Can be used by callers for their own replay detection logic
+ * @dev To check if a new ClockInfo is fresher than a previous one, compare in this order:
+ *      1. resetCount: If current > lastSeen, TPM was reset (valid even if clock is smaller)
+ *      2. restartCount: If current > lastSeen (same resetCount), TPM was restarted (valid)
+ *      3. clock: If same reset/restart counts, clock must be strictly greater
+ *      If any counter is less than lastSeen, it indicates rollback (reject).
+ *      If all values are equal, it indicates replay (reject).
+ */
+struct ClockInfo {
+    uint64 clock; // TPM clock value in milliseconds
+    uint32 resetCount; // TPM reset count since manufacture
+    uint32 restartCount; // Restart count since last reset
+    bool safe; // Whether the TPM clock is in a safe state
+}
 
 /**
  * @title Trusted Platform Module (TPM) Onchain Attestation Interface
- * @notice This interface defines the functions for verifying TPM quotes and checking correctness of user data and PCR measurements
- * @notice It extends the ICertChainRegistry to include the ability to configure trusted CA issuers for TPM Attestation Keys
+ * @notice This interface defines the functions for verifying TPM quotes and checking correctness of user data and PCR
+ * measurements
+ * @notice It extends the ICertChainRegistry to include the ability to configure trusted CA issuers for TPM Attestation
+ * Keys
+ * @dev IMPORTANT: This contract does NOT include replay protection. Callers MUST implement their own freshness checks.
  */
 interface ITpmAttestation is ICertChainRegistry {
     event TpmSignatureVerified(bytes32 indexed tpmQuoteHash);
@@ -59,7 +80,11 @@ interface ITpmAttestation is ICertChainRegistry {
      * @return success - Whether the verification was successful
      * @return akPubkey - The Attestation Key abi-encoded in Pubkey type; otherwise the raw bytes of error message
      */
-    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, bytes[] calldata akCertchain)
+    function verifyTpmQuote(
+        bytes calldata tpmQuote,
+        bytes calldata tpmSignature,
+        bytes[] calldata akCertchain
+    )
         external
         returns (bool, bytes memory);
 
@@ -72,7 +97,11 @@ interface ITpmAttestation is ICertChainRegistry {
      * @return success - Whether the verification was successful
      * @return errorMessage - An error message if the verification failed
      */
-    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, Pubkey calldata akPub)
+    function verifyTpmQuoteWithTrustedAkPub(
+        bytes calldata tpmQuote,
+        bytes calldata tpmSignature,
+        CertPubkey calldata akPub
+    )
         external
         returns (bool, string memory);
 
@@ -92,7 +121,10 @@ interface ITpmAttestation is ICertChainRegistry {
      * @return returnData - if success is true, this returns the extracted user data from the TPM quote
      * @dev if success is false, returnData will contain an error message
      */
-    function checkPcrMeasurements(bytes calldata tpmQuote, MeasureablePcr[] calldata tpmPcrs)
+    function checkPcrMeasurements(
+        bytes calldata tpmQuote,
+        MeasureablePcr[] calldata tpmPcrs
+    )
         external
         returns (bool, bytes memory);
 
@@ -102,4 +134,12 @@ interface ITpmAttestation is ICertChainRegistry {
      * @return pcrs - The final PCR measurement format
      */
     function toFinalMeasurement(MeasureablePcr[] calldata tpmPcrs) external pure returns (Pcr[] memory);
+
+    /**
+     * @notice Extract ClockInfo from TPM quote for caller's own replay protection
+     * @dev Callers are responsible for implementing their own replay logic if needed.
+     * @param tpmQuote - The TPM quote bytes
+     * @return info - The parsed ClockInfo struct including safe flag
+     */
+    function extractClockInfo(bytes calldata tpmQuote) external pure returns (ClockInfo memory info);
 }

@@ -4,16 +4,31 @@ pragma solidity ^0.8.0;
 // Inspired by ensdomains/dnssec-oracle - BSD-2-Clause license
 // https://github.com/ensdomains/dnssec-oracle/blob/master/contracts/BytesUtils.sol
 
+import {
+    BytesOffsetOutOfBounds,
+    BytesInsufficientLength,
+    BytesLengthExceeds32,
+    BytesLengthExceeds52,
+    BytesInvalidBase32Char,
+    BytesInvalidBase32DecodedValue,
+    BytesInvalidBase32Length
+} from "../types/Errors.sol";
+
+/**
+ * @custom:security-contact security@ata.network
+ */
 library BytesUtils {
-    /*
-    * @dev Returns the keccak-256 hash of a byte range.
-    * @param self The byte string to hash.
-    * @param offset The position to start hashing at.
-    * @param len The number of bytes to hash.
-    * @return The hash of the byte range.
-    */
+    /// @notice Returns the keccak-256 hash of a byte range.
+    /// @dev This function computes the Keccak256 hash of a specific byte range within
+    ///      the input bytes. It performs bounds checking to ensure the offset and length
+    ///      are valid before hashing.
+    /// @param self The byte string to hash.
+    /// @param offset The position to start hashing at (0-indexed).
+    /// @param len The number of bytes to hash.
+    /// @return ret The Keccak256 hash of the specified byte range.
+    /// @dev Reverts if offset + len exceeds the length of self.
     function keccak(bytes memory self, uint256 offset, uint256 len) internal pure returns (bytes32 ret) {
-        require(offset + len <= self.length);
+        if (offset + len > self.length) revert BytesOffsetOutOfBounds();
         assembly {
             ret := keccak256(add(add(self, 32), offset), len)
         }
@@ -152,67 +167,68 @@ library BytesUtils {
     * @param idx The index into the bytes
     * @return The specified 8 bits of the string, interpreted as an integer.
     */
-    function readUint8(bytes memory self, uint256 idx) internal pure returns (uint8 ret) {
+    function readUint8(bytes memory self, uint256 idx) internal pure returns (uint8) {
         return uint8(self[idx]);
     }
 
-    /*
-    * @dev Returns the 16-bit number at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes
-    * @return The specified 16 bits of the string, interpreted as an integer.
-    */
+    /// @notice Returns the 16-bit unsigned integer at the specified index.
+    /// @dev Reads 2 bytes from the byte string starting at idx and interprets them as a uint16
+    ///      in big-endian format.
+    /// @param self The byte string to read from.
+    /// @param idx The index into the bytes (0-indexed).
+    /// @return ret The 16-bit value at the specified index.
+    /// @dev Reverts if idx + 2 exceeds the length of self.
     function readUint16(bytes memory self, uint256 idx) internal pure returns (uint16 ret) {
-        require(idx + 2 <= self.length);
+        if (idx + 2 > self.length) revert BytesInsufficientLength();
         assembly {
             ret := and(mload(add(add(self, 2), idx)), 0xFFFF)
         }
     }
 
-    /*
-    * @dev Returns the 32-bit number at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes
-    * @return The specified 32 bits of the string, interpreted as an integer.
-    */
+    /// @notice Returns the 32-bit unsigned integer at the specified index.
+    /// @dev Reads 4 bytes from the byte string starting at idx and interprets them as a uint32
+    ///      in big-endian format.
+    /// @param self The byte string to read from.
+    /// @param idx The index into the bytes (0-indexed).
+    /// @return ret The 32-bit value at the specified index.
+    /// @dev Reverts if idx + 4 exceeds the length of self.
     function readUint32(bytes memory self, uint256 idx) internal pure returns (uint32 ret) {
-        require(idx + 4 <= self.length);
+        if (idx + 4 > self.length) revert BytesInsufficientLength();
         assembly {
             ret := and(mload(add(add(self, 4), idx)), 0xFFFFFFFF)
         }
     }
 
-    /*
-    * @dev Returns the 32 byte value at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes
-    * @return The specified 32 bytes of the string.
-    */
+    /// @notice Returns the 32-byte value at the specified index.
+    /// @dev Reads 32 bytes from the byte string starting at idx and returns them as a bytes32.
+    /// @param self The byte string to read from.
+    /// @param idx The index into the bytes (0-indexed).
+    /// @return ret The 32-byte value at the specified index.
+    /// @dev Reverts if idx + 32 exceeds the length of self.
     function readBytes32(bytes memory self, uint256 idx) internal pure returns (bytes32 ret) {
-        require(idx + 32 <= self.length);
+        if (idx + 32 > self.length) revert BytesInsufficientLength();
         assembly {
             ret := mload(add(add(self, 32), idx))
         }
     }
 
-    /*
-    * @dev Returns the 32 byte value at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes
-    * @return The specified 32 bytes of the string.
-    */
+    /// @notice Returns the 20-byte value at the specified index.
+    /// @dev Reads 20 bytes from the byte string starting at idx and returns them as a bytes20
+    ///      (typically used for Ethereum addresses).
+    /// @param self The byte string to read from.
+    /// @param idx The index into the bytes (0-indexed).
+    /// @return ret The 20-byte value at the specified index.
+    /// @dev Reverts if idx + 20 exceeds the length of self.
     function readBytes20(bytes memory self, uint256 idx) internal pure returns (bytes20 ret) {
-        require(idx + 20 <= self.length);
+        if (idx + 20 > self.length) revert BytesInsufficientLength();
         assembly {
-            ret := and(
-                mload(add(add(self, 32), idx)),
-                0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000000
-            )
+            ret :=
+                and(mload(add(add(self, 32), idx)), 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000000)
         }
     }
 
     function readBytes8(bytes memory b, uint256 index) internal pure returns (bytes8 result) {
-        require(b.length >= index + 8, "GREATER_OR_EQUAL_TO_8_LENGTH_REQUIRED");
+        if (b.length < index + 8) revert BytesInsufficientLength();
 
         // Arrays are prefixed by a 32 byte length field
         index += 32;
@@ -235,8 +251,8 @@ library BytesUtils {
     * @return The specified 32 bytes of the string.
     */
     function readBytesN(bytes memory self, uint256 idx, uint256 len) internal pure returns (bytes32 ret) {
-        require(len <= 32);
-        require(idx + len <= self.length);
+        if (len > 32) revert BytesLengthExceeds32();
+        if (idx + len > self.length) revert BytesInsufficientLength();
         assembly {
             let mask := not(sub(exp(256, sub(32, len)), 1))
             ret := and(mload(add(add(self, 32), idx)), mask)
@@ -275,7 +291,7 @@ library BytesUtils {
     * @param len The number of bytes to copy.
     */
     function substring(bytes memory self, uint256 offset, uint256 len) internal pure returns (bytes memory) {
-        require(offset + len <= self.length);
+        if (offset + len > self.length) revert BytesOffsetOutOfBounds();
 
         bytes memory ret = new bytes(len);
         uint256 dest;
@@ -292,7 +308,7 @@ library BytesUtils {
 
     // Maps characters from 0x30 to 0x7A to their base32 values.
     // 0xFF represents invalid characters in that range.
-    bytes constant base32HexTable =
+    bytes internal constant base32HexTable =
         hex"00010203040506070809FFFFFFFFFFFFFF0A0B0C0D0E0F101112131415161718191A1B1C1D1E1FFFFFFFFFFFFFFFFFFFFF0A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
 
     /**
@@ -303,15 +319,15 @@ library BytesUtils {
      * @return The decoded data, left aligned.
      */
     function base32HexDecodeWord(bytes memory self, uint256 off, uint256 len) internal pure returns (bytes32) {
-        require(len <= 52);
+        if (len > 52) revert BytesLengthExceeds52();
 
         uint256 ret = 0;
         uint8 decoded;
         for (uint256 i = 0; i < len; i++) {
             bytes1 char = self[off + i];
-            require(char >= 0x30 && char <= 0x7A);
+            if (char < 0x30 || char > 0x7A) revert BytesInvalidBase32Char();
             decoded = uint8(base32HexTable[uint256(uint8(char)) - 0x30]);
-            require(decoded <= 0x20);
+            if (decoded > 0x20) revert BytesInvalidBase32DecodedValue();
             if (i == len - 1) {
                 break;
             }
@@ -339,7 +355,7 @@ library BytesUtils {
             ret = (ret << 2) | (decoded >> 3);
             bitlen -= 3;
         } else {
-            revert();
+            revert BytesInvalidBase32Length();
         }
 
         return bytes32(ret << (256 - bitlen));
