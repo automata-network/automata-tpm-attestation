@@ -159,7 +159,7 @@ library LibX509 {
         bytes memory data = pubkey.data;
         bytes32 x;
         bytes32 y;
-        assembly {
+        assembly ("memory-safe") {
             x := mload(add(data, 0x21))
             y := mload(add(data, 0x41))
         }
@@ -710,7 +710,7 @@ library LibX509 {
         bool rNeedsPrefix = uint8(r[32 - rLen]) >= 0x80;
         uint256 rTotalLen = rLen + (rNeedsPrefix ? 1 : 0);
         bytes memory rBytes = new bytes(rTotalLen);
-        assembly {
+        assembly ("memory-safe") {
             let ptr := add(rBytes, 0x20)
 
             if rNeedsPrefix {
@@ -732,7 +732,7 @@ library LibX509 {
         uint256 sTotalLen = sLen + (sNeedsPrefix ? 1 : 0);
 
         bytes memory sBytes = new bytes(sTotalLen);
-        assembly {
+        assembly ("memory-safe") {
             let ptr := add(sBytes, 0x20)
 
             if sNeedsPrefix {
@@ -803,7 +803,7 @@ library LibX509 {
         if (rLen > 32 || sLen > 32) revert EcdsaComponentTooLarge();
 
         // Convert to bytes32, padding on the left if necessary
-        assembly {
+        assembly ("memory-safe") {
             // Load r into bytes32
             let rDataPtr := add(add(rBytes, 0x20), rStart)
             r := mload(rDataPtr)

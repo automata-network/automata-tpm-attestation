@@ -38,7 +38,7 @@ library LibBytes {
         if (input.length < offset + 48) {
             revert InvalidLength(input.length, offset + 48);
         }
-        assembly {
+        assembly ("memory-safe") {
             function store48(dest, src, off) {
                 mstore(dest, mload(add(add(src, 0x20), off)))
                 mstore(add(dest, 0x20), mload(add(add(src, 0x40), off)))
@@ -58,7 +58,7 @@ library LibBytes {
         if (input.length < offset + 64) {
             revert InvalidLength(input.length, offset + 64);
         }
-        assembly {
+        assembly ("memory-safe") {
             function store64(dest, src, off) {
                 mstore(dest, mload(add(add(src, 0x20), off)))
                 mstore(add(dest, 0x20), mload(add(add(src, 0x40), off)))
@@ -73,7 +73,7 @@ library LibBytes {
     /// @param offset The byte offset to start reading from (0-indexed).
     /// @return output The 2-byte value at the specified offset.
     function readBytes2(bytes memory input, uint256 offset) internal pure returns (bytes2 output) {
-        assembly {
+        assembly ("memory-safe") {
             output := mload(add(add(input, 0x20), offset))
         }
     }
@@ -89,7 +89,7 @@ library LibBytes {
         if (input.length < offset + 4) {
             revert InvalidLength(input.length, offset + 4);
         }
-        assembly {
+        assembly ("memory-safe") {
             output := mload(add(add(input, 0x20), offset))
         }
     }
@@ -105,7 +105,7 @@ library LibBytes {
         if (input.length < offset + 32) {
             revert InvalidLength(input.length, offset + 32);
         }
-        assembly {
+        assembly ("memory-safe") {
             output := mload(add(add(input, 0x20), offset))
         }
     }
@@ -149,8 +149,7 @@ library LibBytes {
     /// @dev Returns whether `a` equals `b`.
     /// @notice Derived from Solady: https://github.com/Vectorized/solady/blob/73f13dd/src/utils/LibBytes.sol#L661-L667
     function equal(bytes memory a, bytes memory b) internal pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
+        assembly ("memory-safe") {
             result := eq(keccak256(add(a, 0x20), mload(a)), keccak256(add(b, 0x20), mload(b)))
         }
     }
@@ -177,8 +176,7 @@ library LibBytes {
     /// @notice Derived from Solady: https://github.com/Vectorized/solady/blob/73f13dd/src/utils/LibBytes.sol#L443-L472
     function slice(bytes memory subject, uint256 start, uint256 len) internal pure returns (bytes memory result) {
         uint256 end = start + len;
-        /// @solidity memory-safe-assembly
-        assembly {
+        assembly ("memory-safe") {
             let l := mload(subject) // Subject length.
             if iszero(gt(l, end)) { end := l }
             if iszero(gt(l, start)) { start := l }
