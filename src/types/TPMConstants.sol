@@ -2,9 +2,7 @@
 // Automata Contracts
 pragma solidity ^0.8.0;
 
-/**
- * @custom:security-contact security@ata.network
- */
+/// @custom:security-contact security@ata.network
 library TPMConstants {
     // All constants related to TPM2 are defined here
     // Reference: TPM-Rev-2.0-Part-2-Structures-01.38.pdf

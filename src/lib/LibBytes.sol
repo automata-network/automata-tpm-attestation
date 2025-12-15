@@ -20,9 +20,7 @@ struct Bytes48 {
     bytes16 second;
 }
 
-/**
- * @custom:security-contact security@ata.network
- */
+/// @custom:security-contact security@ata.network
 library LibBytes {
     bytes16 private constant _SYMBOLS = "0123456789abcdef";
 

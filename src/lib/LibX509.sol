@@ -6,7 +6,7 @@ import { Asn1Decode, NodePtr } from "./Asn1Decode.sol";
 import { LibBytes } from "./LibBytes.sol";
 import { DateTimeLib } from "@solady/utils/DateTimeLib.sol";
 
-import { TPMConstants } from "../types/Constants.sol";
+import { TPMConstants } from "../types/TPMConstants.sol";
 import {
     NotEcPublicKey,
     NotRsaPublicKey,
@@ -1333,7 +1333,7 @@ library LibX509 {
         return (false, "");
     }
 
-    /* ============ CRL (Certificate Revocation List) Functions ============ */
+    /// ============ CRL (Certificate Revocation List) Functions ============
 
     // 2.5.29.35 - Authority Key Identifier OID (for CRL)
     bytes constant CRL_AUTHORITY_KEY_IDENTIFIER_OID = hex"551D23";

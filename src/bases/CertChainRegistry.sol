@@ -27,16 +27,14 @@ import {
     ZeroAddress
 } from "../types/Errors.sol";
 
-/**
- * @title CertChainRegistry
- * @notice Registry for managing and verifying X.509 certificate chains used in TEE attestation
- * @dev This abstract contract provides X.509 certificate chain verification for TPM attestation keys (AK).
- *      It implements a trust hierarchy with root CAs and supports intermediate certificate caching
- *      for gas optimization.
- *      Certificate chain order: [leaf, intermediate(s)..., root]
- *      Maximum chain length: 4 certificates
- * @custom:security-contact security@ata.network
- */
+/// @title CertChainRegistry
+/// @notice Registry for managing and verifying X.509 certificate chains used in TEE attestation
+/// @dev This abstract contract provides X.509 certificate chain verification for TPM attestation keys (AK).
+///      It implements a trust hierarchy with root CAs and supports intermediate certificate caching
+///      for gas optimization.
+///      Certificate chain order: [leaf, intermediate(s)..., root]
+///      Maximum chain length: 4 certificates
+/// @custom:security-contact security@ata.network
 abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     using LibX509 for bytes;
     using LibX509Verify for CertPubkey;
@@ -77,13 +75,11 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         strictCRLMode = false; // Default: disabled for backward compatibility
     }
 
-    /**
-     * @notice Adds a trusted root Certificate Authority to the registry
-     * @dev Performs the following validations before adding:
-     *      1. Verifies certificate constraints (CA flag, key usage)
-     *      2. Verifies the certificate is self-signed (root CA)
-     * @param ca The DER-encoded X.509 root CA certificate
-     */
+    /// @notice Adds a trusted root Certificate Authority to the registry
+    /// @dev Performs the following validations before adding:
+    ///      1. Verifies certificate constraints (CA flag, key usage)
+    ///      2. Verifies the certificate is self-signed (root CA)
+    /// @param ca The DER-encoded X.509 root CA certificate
     function addCA(bytes calldata ca) public override onlyOwner {
         bytes32 key = keccak256(ca);
         _verifyCertificateConstraints(ca, false, 0);
@@ -95,11 +91,9 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         emit AddCA(ca);
     }
 
-    /**
-     * @notice Removes a Certificate Authority (CA) from the registry.
-     * @param ca - The X509 Certificate Authority (CA) in DER format.
-     * @dev should implement access-control
-     */
+    /// @notice Removes a Certificate Authority (CA) from the registry.
+    /// @param ca - The X509 Certificate Authority (CA) in DER format.
+    /// @dev should implement access-control
     function removeCA(bytes calldata ca) public onlyOwner {
         bytes32 key = keccak256(ca);
         require(verifiedCA[key], CertNotCa());
@@ -128,12 +122,10 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         return revokedCertificates[issuerHash][serialNumber];
     }
 
-    /**
-     * @notice Removes cached intermediate certificates from the registry
-     * @dev Used for cache invalidation when intermediate CAs are compromised or retired.
-     *      Does not affect root CA trust - only clears the verification cache.
-     * @param certHashes Array of binding hashes to remove from cache
-     */
+    /// @notice Removes cached intermediate certificates from the registry
+    /// @dev Used for cache invalidation when intermediate CAs are compromised or retired.
+    ///      Does not affect root CA trust - only clears the verification cache.
+    /// @param certHashes Array of binding hashes to remove from cache
     function removeIntermediateCerts(bytes32[] calldata certHashes) public onlyOwner {
         for (uint256 i = 0; i < certHashes.length; i++) {
             bytes32 certHash = certHashes[i];
@@ -233,14 +225,12 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         );
     }
 
-    /**
-     * @notice Verifies a certificate's signature using the issuer's public key
-     * @dev Extracts the TBS (To Be Signed) data, signature, and algorithm from the certificate,
-     *      then verifies using the appropriate algorithm (RSA or ECDSA).
-     * @param cert The DER-encoded certificate to verify
-     * @param issuer The public key of the issuing CA
-     * @return True if the signature is valid, false otherwise
-     */
+    /// @notice Verifies a certificate's signature using the issuer's public key
+    /// @dev Extracts the TBS (To Be Signed) data, signature, and algorithm from the certificate,
+    ///      then verifies using the appropriate algorithm (RSA or ECDSA).
+    /// @param cert The DER-encoded certificate to verify
+    /// @param issuer The public key of the issuing CA
+    /// @return True if the signature is valid, false otherwise
     function verifyCertSignature(bytes calldata cert, CertPubkey memory issuer) public view returns (bool) {
         bytes memory tbs = LibX509.getCertTbs(cert);
         bytes memory signature = LibX509.getCertSignature(cert);
@@ -249,22 +239,20 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         return issuer.verifySignature(sigAlgo, tbs, signature, p256);
     }
 
-    /**
-     * @notice Verifies an X.509 certificate chain up to a trusted root CA
-     * @dev Performs comprehensive chain verification:
-     *      1. Validates chain length (1-4 certificates)
-     *      2. Verifies root CA is in the trusted set
-     *      3. Checks for cached intermediates to skip re-verification
-     *      4. Validates each certificate (validity, CA constraints, revocation)
-     *      5. Verifies signatures from leaf to cached/root
-     *      6. Caches newly verified intermediates for future use
-     *
-     *      Chain order: [leaf, intermediate(s)..., root]
-     *
-     * @param certs Array of DER-encoded certificates ordered from leaf to root
-     * @return The public key extracted from the leaf certificate
-     * @custom:security Revocation is checked for all certificates in the chain
-     */
+    /// @notice Verifies an X.509 certificate chain up to a trusted root CA
+    /// @dev Performs comprehensive chain verification:
+    ///      1. Validates chain length (1-4 certificates)
+    ///      2. Verifies root CA is in the trusted set
+    ///      3. Checks for cached intermediates to skip re-verification
+    ///      4. Validates each certificate (validity, CA constraints, revocation)
+    ///      5. Verifies signatures from leaf to cached/root
+    ///      6. Caches newly verified intermediates for future use
+    ///
+    ///      Chain order: [leaf, intermediate(s)..., root]
+    ///
+    /// @param certs Array of DER-encoded certificates ordered from leaf to root
+    /// @return The public key extracted from the leaf certificate
+    /// @custom:security Revocation is checked for all certificates in the chain
     function verifyCertChain(bytes[] calldata certs) public returns (CertPubkey memory) {
         uint256 certLen = certs.length;
         require(certLen > 0 && certLen < 5, InvalidCertChainLength());
