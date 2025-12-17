@@ -90,8 +90,9 @@ struct Pcr {
 
 // Public key representation
 struct CertPubkey {
-    uint256 algo;          // Algorithm identifier
-    bytes data;           // Key data
+    uint16 algo;           // Algorithm identifier (TPM_ALG_RSA or TPM_ALG_ECC)
+    uint16 params;         // Algorithm-specific parameters (curve ID for EC, 0 for RSA)
+    bytes data;            // Key data
 }
 ```
 
