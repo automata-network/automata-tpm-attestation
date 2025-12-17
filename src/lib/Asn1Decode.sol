@@ -5,7 +5,7 @@ pragma solidity ^0.8.0;
 // Inspired by PufferFinance/rave
 // https://github.com/JonahGroendal/asn1-decode/blob/5c2d1469fc678513753786acb441e597969192ec/contracts/Asn1Decode.sol
 
-import { BytesUtils } from "./BytesUtils.sol";
+import {BytesUtils} from "./BytesUtils.sol";
 import {
     Asn1NotBitString,
     Asn1NotOctetString,

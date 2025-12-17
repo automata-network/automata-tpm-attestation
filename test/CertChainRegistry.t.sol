@@ -1,16 +1,16 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.27;
 
 // Testing utilities
 import "forge-std/console.sol";
-import { Test } from "forge-std/Test.sol";
-import { stdJson } from "forge-std/StdJson.sol";
+import {Test} from "forge-std/Test.sol";
+import {stdJson} from "forge-std/StdJson.sol";
 
 // Target contracts
-import { CertChainRegistry } from "src/bases/CertChainRegistry.sol";
-import { ICertChainRegistry } from "src/interfaces/ICertChainRegistry.sol";
-import { LibX509, CertPubkey, CRLInfo } from "src/lib/LibX509.sol";
-import { LibX509Verify } from "src/lib/LibX509Verify.sol";
+import {CertChainRegistry} from "src/bases/CertChainRegistry.sol";
+import {ICertChainRegistry} from "src/interfaces/ICertChainRegistry.sol";
+import {LibX509, CertPubkey, CRLInfo} from "src/lib/LibX509.sol";
+import {LibX509Verify} from "src/lib/LibX509Verify.sol";
 import {
     CertificateAlreadyRevoked,
     CRLIssuerMismatch,
@@ -21,7 +21,7 @@ import {
 } from "src/types/Errors.sol";
 
 contract MockCertChainRegistry is CertChainRegistry {
-    constructor(address _owner) CertChainRegistry(_owner, LibX509Verify.P256_VERIFIER) { }
+    constructor(address _owner) CertChainRegistry(_owner, LibX509Verify.P256_VERIFIER) {}
 }
 
 /// @title CertChainRegistry_Test
@@ -153,13 +153,8 @@ contract CertChainRegistry_DNAndAKIDVerification_Test is CertChainRegistry_Test 
 
     /// @notice Test DN verification by extracting and comparing manually
     function test_getCertSubjectDN_matchesIssuerDN() public view {
-        string[5] memory certTypes = [
-            "gcp_snp_vek_certs",
-            "azure_snp_vek_certs",
-            "gcp_tdx_tpm_certs",
-            "gcp_snp_tpm_certs",
-            "self_signed_ec_ca"
-        ];
+        string[5] memory certTypes =
+            ["gcp_snp_vek_certs", "azure_snp_vek_certs", "gcp_tdx_tpm_certs", "gcp_snp_tpm_certs", "self_signed_ec_ca"];
 
         for (uint256 t = 0; t < certTypes.length; t++) {
             bytes[] memory certs = _loadCertificate(certTypes[t]);
@@ -205,13 +200,8 @@ contract CertChainRegistry_DNAndAKIDVerification_Test is CertChainRegistry_Test 
     /// @notice Test AKID/SKID matching in valid chains using the new verification function
     /// Per RFC 5280 Section 6.1.4(d): If issuer has SKID, subject MUST have matching AKID
     function test_validChain_AKIDMatchesSKID() public view {
-        string[5] memory certTypes = [
-            "azure_snp_vek_certs",
-            "gcp_snp_vek_certs",
-            "gcp_snp_tpm_certs",
-            "gcp_tdx_tpm_certs",
-            "self_signed_ec_ca"
-        ];
+        string[5] memory certTypes =
+            ["azure_snp_vek_certs", "gcp_snp_vek_certs", "gcp_snp_tpm_certs", "gcp_tdx_tpm_certs", "self_signed_ec_ca"];
         for (uint256 t = 0; t < certTypes.length; t++) {
             bytes[] memory certs = _loadCertificate(certTypes[t]);
 
@@ -223,11 +213,7 @@ contract CertChainRegistry_DNAndAKIDVerification_Test is CertChainRegistry_Test 
     /// @notice Test that all supported certificate types have valid DN chains
     function test_allCertTypes_haveValidDNChains() public {
         // Only test certificate types that are fully supported
-        string[3] memory certTypes = [
-            "gcp_snp_tpm_certs",
-            "gcp_tdx_tpm_certs",
-            "self_signed_ec_ca"
-        ];
+        string[3] memory certTypes = ["gcp_snp_tpm_certs", "gcp_tdx_tpm_certs", "self_signed_ec_ca"];
 
         for (uint256 t = 0; t < certTypes.length; t++) {
             bytes[] memory certs = _loadCertificate(certTypes[t]);
@@ -238,8 +224,7 @@ contract CertChainRegistry_DNAndAKIDVerification_Test is CertChainRegistry_Test 
 
             // Verify chain passes (includes DN check)
             CertPubkey memory result = registry.verifyCertChain(certs);
-            assertTrue(result.data.length > 0,
-                       string(abi.encodePacked("Chain should be valid: ", certTypes[t])));
+            assertTrue(result.data.length > 0, string(abi.encodePacked("Chain should be valid: ", certTypes[t])));
 
             // Verify DN linkage using the new verification function
             LibX509.verifyDNChainLinkage(certs);
@@ -313,7 +298,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
         require(certs.length == 2, "Need 2 certs");
 
-        bytes memory caCert = certs[1];  // Root CA
+        bytes memory caCert = certs[1]; // Root CA
         registry.addCA(caCert);
 
         // Update CRL
@@ -369,7 +354,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
         require(certs.length == 2, "Need 2 certs");
 
-        bytes memory caCert = certs[1];  // Root CA
+        bytes memory caCert = certs[1]; // Root CA
         bytes memory leafCert = certs[0]; // Leaf cert (wrong issuer)
         registry.addCA(caCert);
 
@@ -387,7 +372,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
         require(certs.length == 2, "Need 2 certs");
 
-        bytes memory caCert = certs[1];  // Root CA
+        bytes memory caCert = certs[1]; // Root CA
         registry.addCA(caCert);
 
         // First update with newer CRL
@@ -408,7 +393,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
         require(certs.length == 2, "Need 2 certs");
 
-        bytes memory caCert = certs[1];  // Root CA
+        bytes memory caCert = certs[1]; // Root CA
         registry.addCA(caCert);
 
         bytes memory crlBytes = _loadEmptyCRL();
@@ -420,12 +405,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         vm.expectEmit(true, false, false, true);
         emit ICertChainRegistry.CRLUpdated(
-            issuerHash,
-            crlInfo.issuerDN,
-            crlInfo.authorityKeyId,
-            crlHash,
-            crlInfo.thisUpdate,
-            crlInfo.nextUpdate
+            issuerHash, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
         );
 
         registry.updateCRL(crlBytes, caCert);
@@ -439,7 +419,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
         require(certs.length == 2, "Need 2 certs");
 
-        bytes memory caCert = certs[1];  // Root CA
+        bytes memory caCert = certs[1]; // Root CA
         registry.addCA(caCert);
 
         // First update with empty CRL
@@ -650,12 +630,13 @@ contract CertChainRegistry_ZeroAddress_Test is Test {
     /// @notice Tests that constructor succeeds with valid p256 address
     function test_constructor_validP256Address_succeeds() public {
         address validP256 = address(0x1234);
-        MockCertChainRegistry_ZeroAddressTest registry = new MockCertChainRegistry_ZeroAddressTest(address(this), validP256);
+        MockCertChainRegistry_ZeroAddressTest registry =
+            new MockCertChainRegistry_ZeroAddressTest(address(this), validP256);
         assertEq(registry.p256(), validP256, "p256 should be set correctly");
     }
 }
 
 /// @notice Mock contract for zero-address testing
 contract MockCertChainRegistry_ZeroAddressTest is CertChainRegistry {
-    constructor(address _owner, address _p256) CertChainRegistry(_owner, _p256) { }
+    constructor(address _owner, address _p256) CertChainRegistry(_owner, _p256) {}
 }

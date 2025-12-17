@@ -2,9 +2,13 @@
 // Automata Contracts
 pragma solidity ^0.8.27;
 
-import { RsaSignatureSizeMismatchModulusSize, UnsupportedHashAlgorithm, UnsupportedSignatureScheme } from "../types/Errors.sol";
-import { RSA } from "@openzeppelin/contracts/utils/cryptography/RSA.sol";
-import { CertPubkey, SignatureAlgorithm, LibX509, TPMConstants } from "./LibX509.sol";
+import {
+    RsaSignatureSizeMismatchModulusSize,
+    UnsupportedHashAlgorithm,
+    UnsupportedSignatureScheme
+} from "../types/Errors.sol";
+import {RSA} from "@openzeppelin/contracts/utils/cryptography/RSA.sol";
+import {CertPubkey, SignatureAlgorithm, LibX509, TPMConstants} from "./LibX509.sol";
 
 /// @title LibX509Verify
 /// @notice A library for verifying X.509 certificate signatures
@@ -54,11 +58,7 @@ library LibX509Verify {
         bytes memory message,
         bytes memory signature,
         address ecdsaP256Verifier
-    )
-        internal
-        view
-        returns (bool)
-    {
+    ) internal view returns (bool) {
         bytes32 digest;
         if (sigAlgo.hashAlgo == TPMConstants.TPM_ALG_SHA256) {
             digest = sha256(message);
@@ -110,14 +110,7 @@ library LibX509Verify {
     ///      - Input: abi.encode(digest, r, s, x, y)
     ///      - Output: uint256 (0 = invalid, 1 = valid)
     ///      - Never reverts (always returns 0 or 1)
-    function ecdsaVerify(
-        address verifier,
-        bytes32 digest,
-        bytes32 r,
-        bytes32 s,
-        bytes32 x,
-        bytes32 y
-    )
+    function ecdsaVerify(address verifier, bytes32 digest, bytes32 r, bytes32 s, bytes32 x, bytes32 y)
         internal
         view
         returns (bool verified)

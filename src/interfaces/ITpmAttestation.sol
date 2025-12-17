@@ -37,7 +37,7 @@ struct Pcr {
     uint256[] measureEventsIdx;
 }
 
-import { ICertChainRegistry, CertPubkey } from "./ICertChainRegistry.sol";
+import {ICertChainRegistry, CertPubkey} from "./ICertChainRegistry.sol";
 
 /// @title TPMS_CLOCK_INFO structure from TPM quote
 /// @notice Can be used by callers for their own replay detection logic
@@ -70,11 +70,7 @@ interface ITpmAttestation is ICertChainRegistry {
     /// @param akCertchain - The attestation key certificate chain
     /// @return success - Whether the verification was successful
     /// @return akPubkey - The Attestation Key abi-encoded in Pubkey type; otherwise the raw bytes of error message
-    function verifyTpmQuote(
-        bytes calldata tpmQuote,
-        bytes calldata tpmSignature,
-        bytes[] calldata akCertchain
-    )
+    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, bytes[] calldata akCertchain)
         external
         returns (bool, bytes memory);
 
@@ -89,9 +85,7 @@ interface ITpmAttestation is ICertChainRegistry {
         bytes calldata tpmQuote,
         bytes calldata tpmSignature,
         CertPubkey calldata akPub
-    )
-        external
-        returns (bool, string memory);
+    ) external returns (bool, string memory);
 
     /// Extracts extra data from the TPM quote
     /// @param tpmQuote - TPM quote
@@ -105,10 +99,7 @@ interface ITpmAttestation is ICertChainRegistry {
     /// @return success - Whether the check was successful
     /// @return returnData - if success is true, this returns the extracted user data from the TPM quote
     /// @dev if success is false, returnData will contain an error message
-    function checkPcrMeasurements(
-        bytes calldata tpmQuote,
-        MeasureablePcr[] calldata tpmPcrs
-    )
+    function checkPcrMeasurements(bytes calldata tpmQuote, MeasureablePcr[] calldata tpmPcrs)
         external
         returns (bool, bytes memory);
 

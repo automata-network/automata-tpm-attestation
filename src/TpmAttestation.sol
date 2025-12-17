@@ -2,11 +2,11 @@
 // Automata Contracts
 pragma solidity ^0.8.27;
 
-import { ITpmAttestation, MeasureablePcr, Pcr, ClockInfo } from "./interfaces/ITpmAttestation.sol";
-import { CertPubkey, SignatureAlgorithm, LibX509 } from "./lib/LibX509.sol";
-import { LibX509Verify } from "./lib/LibX509Verify.sol";
-import { TPMConstants } from "./types/TPMConstants.sol";
-import { CertChainRegistry } from "./bases/CertChainRegistry.sol";
+import {ITpmAttestation, MeasureablePcr, Pcr, ClockInfo} from "./interfaces/ITpmAttestation.sol";
+import {CertPubkey, SignatureAlgorithm, LibX509} from "./lib/LibX509.sol";
+import {LibX509Verify} from "./lib/LibX509Verify.sol";
+import {TPMConstants} from "./types/TPMConstants.sol";
+import {CertChainRegistry} from "./bases/CertChainRegistry.sol";
 import {
     InvalidCertChainLength,
     InvalidCertificateChain,
@@ -59,7 +59,7 @@ import {
 contract TpmAttestation is CertChainRegistry, ITpmAttestation {
     using LibX509Verify for CertPubkey;
 
-    constructor(address _intitialOwner, address _p256) CertChainRegistry(_intitialOwner, _p256) { }
+    constructor(address _intitialOwner, address _p256) CertChainRegistry(_intitialOwner, _p256) {}
 
     /// @notice Verifies TPM quote signature and certificate chain
     /// @dev IMPORTANT: This function does NOT include replay protection.
@@ -71,11 +71,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
     /// @param akCertchain Array of DER-encoded certificates [leaf, intermediate..., root]
     /// @return success Whether the verification succeeded
     /// @return akPubEncoded ABI-encoded CertPubkey of the attestation key
-    function verifyTpmQuote(
-        bytes calldata tpmQuote,
-        bytes calldata tpmSignature,
-        bytes[] calldata akCertchain
-    )
+    function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, bytes[] calldata akCertchain)
         external
         override
         returns (bool, bytes memory)
@@ -103,11 +99,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         bytes calldata tpmQuote,
         bytes calldata tpmSignature,
         CertPubkey calldata akPub
-    )
-        external
-        override
-        returns (bool, string memory)
-    {
+    ) external override returns (bool, string memory) {
         _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
         return (true, "");
     }
@@ -143,10 +135,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
     /// @return success True if all PCR measurements match
     /// @return extraData The extra data field extracted from the quote
     /// @custom:security Critical for workload integrity - ensures the TPM measured expected values
-    function checkPcrMeasurements(
-        bytes calldata tpmQuote,
-        MeasureablePcr[] calldata tpmPcrs
-    )
+    function checkPcrMeasurements(bytes calldata tpmQuote, MeasureablePcr[] calldata tpmPcrs)
         external
         override
         returns (bool, bytes memory extraData)
@@ -278,11 +267,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         emit TpmSignatureVerified(keccak256(tpmQuote));
     }
 
-    function _verifyTpmQuoteSignature(
-        bytes calldata tpmQuote,
-        bytes calldata tpmSignature,
-        CertPubkey memory akPub
-    )
+    function _verifyTpmQuoteSignature(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub)
         private
         view
     {

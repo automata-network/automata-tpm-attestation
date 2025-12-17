@@ -2,11 +2,11 @@
 // Automata Contracts
 pragma solidity ^0.8.15;
 
-import { Asn1Decode, NodePtr } from "./Asn1Decode.sol";
-import { LibBytes } from "./LibBytes.sol";
-import { DateTimeLib } from "@solady/utils/DateTimeLib.sol";
+import {Asn1Decode, NodePtr} from "./Asn1Decode.sol";
+import {LibBytes} from "./LibBytes.sol";
+import {DateTimeLib} from "@solady/utils/DateTimeLib.sol";
 
-import { TPMConstants } from "../types/TPMConstants.sol";
+import {TPMConstants} from "../types/TPMConstants.sol";
 import {
     NotEcPublicKey,
     NotRsaPublicKey,
@@ -132,7 +132,7 @@ library LibX509 {
             der = abi.encodePacked(der, uint8(0x02), uint8(eLength), e);
         }
 
-        return CertPubkey({ algo: TPMConstants.TPM_ALG_RSA, params: 0, data: der });
+        return CertPubkey({algo: TPMConstants.TPM_ALG_RSA, params: 0, data: der});
     }
 
     /// @notice Checks if a CertPubkey struct is empty (has no key data)
@@ -259,10 +259,7 @@ library LibX509 {
     /// @dev Reverts with UnknownPublicKeyAlgorithm if:
     ///      - The OID is not recognized
     ///      - The signature algorithm is incompatible with the public key type
-    function parseSignatureAlgorithm(
-        CertPubkey memory pubkey,
-        bytes memory sigAlgoOid
-    )
+    function parseSignatureAlgorithm(CertPubkey memory pubkey, bytes memory sigAlgoOid)
         internal
         pure
         returns (SignatureAlgorithm memory)
@@ -271,19 +268,13 @@ library LibX509 {
             // RSA signature algorithms
             if (sigAlgoOid.equal(hex"2a864886f70d01010b")) {
                 // sha256WithRSAEncryption: 1.2.840.113549.1.1.11
-                return SignatureAlgorithm({
-                    scheme: TPMConstants.TPM_ALG_RSASSA,
-                    hashAlgo: TPMConstants.TPM_ALG_SHA256
-                });
+                return SignatureAlgorithm({scheme: TPMConstants.TPM_ALG_RSASSA, hashAlgo: TPMConstants.TPM_ALG_SHA256});
             }
         } else if (pubkey.algo == TPMConstants.TPM_ALG_ECC) {
             // ECDSA signature algorithms
             if (sigAlgoOid.equal(hex"2a8648ce3d040302")) {
                 // ecdsa-with-SHA256: 1.2.840.10045.4.3.2
-                return SignatureAlgorithm({
-                    scheme: TPMConstants.TPM_ALG_ECDSA,
-                    hashAlgo: TPMConstants.TPM_ALG_SHA256
-                });
+                return SignatureAlgorithm({scheme: TPMConstants.TPM_ALG_ECDSA, hashAlgo: TPMConstants.TPM_ALG_SHA256});
             }
         }
 
@@ -476,11 +467,7 @@ library LibX509 {
     /// @param der The DER-encoded certificate bytes
     /// @return exists Whether the SKID extension exists
     /// @return skid The subject key identifier bytes
-    function getSubjectKeyIdentifier(bytes memory der)
-        internal
-        pure
-        returns (bool exists, bytes memory skid)
-    {
+    function getSubjectKeyIdentifier(bytes memory der) internal pure returns (bool exists, bytes memory skid) {
         // OID for SubjectKeyIdentifier: 2.5.29.14
         (bool found, bytes memory skidValue) = _getExtension(der, hex"551D0E");
         if (!found) {
@@ -526,11 +513,7 @@ library LibX509 {
     /// @param der The DER-encoded certificate bytes
     /// @return exists Whether the AKID extension exists
     /// @return akid The authority key identifier bytes (only keyIdentifier field)
-    function getAuthorityKeyIdentifier(bytes memory der)
-        internal
-        pure
-        returns (bool exists, bytes memory akid)
-    {
+    function getAuthorityKeyIdentifier(bytes memory der) internal pure returns (bool exists, bytes memory akid) {
         // OID for AuthorityKeyIdentifier: 2.5.29.35
         (bool found, bytes memory akidValue) = _getExtension(der, hex"551D23");
         if (!found) {
@@ -643,13 +626,13 @@ library LibX509 {
         // Check for optional version field
         uint256 tag = uint8(der[tbsPtr.ixs()]);
         if (tag == 0xA0) {
-            tbsPtr = der.nextSiblingOf(tbsPtr);  // skip version
+            tbsPtr = der.nextSiblingOf(tbsPtr); // skip version
         }
         // Now tbsPtr points to serialNumber regardless of whether version existed
 
-        tbsPtr = der.nextSiblingOf(tbsPtr);  // signature
-        tbsPtr = der.nextSiblingOf(tbsPtr);  // issuer
-        tbsPtr = der.nextSiblingOf(tbsPtr);  // validity
+        tbsPtr = der.nextSiblingOf(tbsPtr); // signature
+        tbsPtr = der.nextSiblingOf(tbsPtr); // issuer
+        tbsPtr = der.nextSiblingOf(tbsPtr); // validity
         (validityNotBefore, validityNotAfter) = _getValidity(der, tbsPtr);
     }
 
@@ -675,15 +658,15 @@ library LibX509 {
         // Check for optional version field
         uint256 tag = uint8(der[tbsPtr.ixs()]);
         if (tag == 0xA0) {
-            tbsPtr = der.nextSiblingOf(tbsPtr);  // skip version
+            tbsPtr = der.nextSiblingOf(tbsPtr); // skip version
         }
         // Now tbsPtr points to serialNumber regardless of whether version existed
 
-        tbsPtr = der.nextSiblingOf(tbsPtr);  // signature
-        tbsPtr = der.nextSiblingOf(tbsPtr);  // issuer
-        tbsPtr = der.nextSiblingOf(tbsPtr);  // validity
-        tbsPtr = der.nextSiblingOf(tbsPtr);  // subject
-        tbsPtr = der.nextSiblingOf(tbsPtr);  // subjectPublicKeyInfo
+        tbsPtr = der.nextSiblingOf(tbsPtr); // signature
+        tbsPtr = der.nextSiblingOf(tbsPtr); // issuer
+        tbsPtr = der.nextSiblingOf(tbsPtr); // validity
+        tbsPtr = der.nextSiblingOf(tbsPtr); // subject
+        tbsPtr = der.nextSiblingOf(tbsPtr); // subjectPublicKeyInfo
         CertPubkey memory subjectPublicKey = _getSubjectPublicKey(der, tbsPtr);
         return subjectPublicKey;
     }
@@ -1108,10 +1091,7 @@ library LibX509 {
     ///        * "RSA pubkey not a SEQUENCE"
     ///        * "RSA modulus n cannot be empty"
     ///        * "RSA exponent e cannot be empty"
-    function _getSubjectPublicKey(
-        bytes memory der,
-        uint256 subjectPublicKeyInfoPtr
-    )
+    function _getSubjectPublicKey(bytes memory der, uint256 subjectPublicKeyInfoPtr)
         private
         pure
         returns (CertPubkey memory pubkey)
@@ -1160,10 +1140,7 @@ library LibX509 {
     /// @param validityPtr Node pointer to the Validity SEQUENCE
     /// @return notBefore Unix timestamp when the certificate becomes valid
     /// @return notAfter Unix timestamp when the certificate expires
-    function _getValidity(
-        bytes memory der,
-        uint256 validityPtr
-    )
+    function _getValidity(bytes memory der, uint256 validityPtr)
         internal
         pure
         returns (uint256 notBefore, uint256 notAfter)
@@ -1232,8 +1209,8 @@ library LibX509 {
             offset = 2;
         } else {
             // GeneralizedTime: YYYY
-            yrs = (uint8(x509Time[0]) - 48) * 1000 + (uint8(x509Time[1]) - 48) * 100
-                + (uint8(x509Time[2]) - 48) * 10 + uint8(x509Time[3]) - 48;
+            yrs = (uint8(x509Time[0]) - 48) * 1000 + (uint8(x509Time[1]) - 48) * 100 + (uint8(x509Time[2]) - 48) * 10
+                + uint8(x509Time[3]) - 48;
             offset = 4;
         }
 
@@ -1269,14 +1246,7 @@ library LibX509 {
     /// @param targetOid The OID of the extension to search for
     /// @return found Whether the extension was found
     /// @return value The extension value (OCTET STRING contents, already decoded)
-    function _getExtension(
-        bytes memory der,
-        bytes memory targetOid
-    )
-        private
-        pure
-        returns (bool, bytes memory)
-    {
+    function _getExtension(bytes memory der, bytes memory targetOid) private pure returns (bool, bytes memory) {
         uint256 tbsPtr = _tbsPtr(der);
         uint256 versionTag = uint8(der[tbsPtr.ixs()]);
         if (versionTag == 0xA0) {

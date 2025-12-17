@@ -2,11 +2,11 @@
 // Automata Contracts
 pragma solidity ^0.8.27;
 
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-import { ICertChainRegistry, CRLData } from "../interfaces/ICertChainRegistry.sol";
-import { CertPubkey, LibX509, SignatureAlgorithm, CRLInfo } from "../lib/LibX509.sol";
-import { LibX509Verify } from "../lib/LibX509Verify.sol";
+import {ICertChainRegistry, CRLData} from "../interfaces/ICertChainRegistry.sol";
+import {CertPubkey, LibX509, SignatureAlgorithm, CRLInfo} from "../lib/LibX509.sol";
+import {LibX509Verify} from "../lib/LibX509Verify.sol";
 import {
     InvalidCertChainLength,
     InvalidSignature,

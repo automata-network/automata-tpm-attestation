@@ -5,7 +5,7 @@ pragma solidity ^0.8.15;
 // Copyright (c) 2022 Vectorized (https://github.com/vectorized/solady)
 // Licensed under the MIT License
 
-import { InvalidLength } from "../types/Errors.sol";
+import {InvalidLength} from "../types/Errors.sol";
 
 using LibBytes for Bytes48 global;
 using LibBytes for Bytes64 global;
@@ -184,7 +184,7 @@ library LibBytes {
                 let i := add(subject, start)
                 let w := not(0x1f)
                 // Copy the `subject` one word at a time, backwards.
-                for { let j := and(add(n, 0x1f), w) } 1 { } {
+                for { let j := and(add(n, 0x1f), w) } 1 {} {
                     mstore(add(result, j), mload(add(i, j)))
                     j := add(j, w) // `sub(j, 0x20)`.
                     if iszero(j) { break }

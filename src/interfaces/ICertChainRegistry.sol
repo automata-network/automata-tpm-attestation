@@ -2,14 +2,14 @@
 // Automata Contracts
 pragma solidity ^0.8.0;
 
-import { CertPubkey } from "../lib/LibX509.sol";
+import {CertPubkey} from "../lib/LibX509.sol";
 
 /// @notice CRL cache data structure
 /// @dev Stores Certificate Revocation List information for a specific issuer
 struct CRLData {
-    bytes32 crlHash;        // Hash of current CRL (for external reference/indexing)
-    uint256 thisUpdate;     // Timestamp when CRL was issued
-    uint256 nextUpdate;     // Timestamp when next CRL should be issued
+    bytes32 crlHash; // Hash of current CRL (for external reference/indexing)
+    uint256 thisUpdate; // Timestamp when CRL was issued
+    uint256 nextUpdate; // Timestamp when next CRL should be issued
 }
 
 /// @title Certificate Chain Registry Interface
@@ -19,8 +19,12 @@ interface ICertChainRegistry {
     event AddCA(bytes ca);
     event RemoveCA(bytes ca);
     event IntermediateCertRemoved(bytes32 indexed certHash);
-    event CertificateRevoked(bytes32 indexed issuerHash, bytes issuerDN, bytes akid, uint256 serialNumber, string reason);
-    event CRLUpdated(bytes32 indexed issuerHash, bytes issuerDN, bytes akid, bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate);
+    event CertificateRevoked(
+        bytes32 indexed issuerHash, bytes issuerDN, bytes akid, uint256 serialNumber, string reason
+    );
+    event CRLUpdated(
+        bytes32 indexed issuerHash, bytes issuerDN, bytes akid, bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate
+    );
     event StrictCRLModeChanged(bool enabled);
 
     /// @notice Returns the address of the P256 Verifier that the contract uses

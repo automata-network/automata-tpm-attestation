@@ -206,8 +206,10 @@ library BytesUtils {
     function readBytes20(bytes memory self, uint256 idx) internal pure returns (bytes20 ret) {
         if (idx + 20 > self.length) revert BytesInsufficientLength();
         assembly ("memory-safe") {
-            ret :=
-                and(mload(add(add(self, 32), idx)), 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000000)
+            ret := and(
+                mload(add(add(self, 32), idx)),
+                0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000000
+            )
         }
     }
 
