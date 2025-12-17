@@ -4,46 +4,55 @@ pragma solidity ^0.8.0;
 // Inspired by ensdomains/dnssec-oracle - BSD-2-Clause license
 // https://github.com/ensdomains/dnssec-oracle/blob/master/contracts/BytesUtils.sol
 
+import {
+    BytesOffsetOutOfBounds,
+    BytesInsufficientLength,
+    BytesLengthExceeds32,
+    BytesLengthExceeds52,
+    BytesInvalidBase32Char,
+    BytesInvalidBase32DecodedValue,
+    BytesInvalidBase32Length
+} from "../types/Errors.sol";
+
+/// @custom:security-contact security@ata.network
 library BytesUtils {
-    /*
-    * @dev Returns the keccak-256 hash of a byte range.
-    * @param self The byte string to hash.
-    * @param offset The position to start hashing at.
-    * @param len The number of bytes to hash.
-    * @return The hash of the byte range.
-    */
+    /// @notice Returns the keccak-256 hash of a byte range.
+    /// @dev This function computes the Keccak256 hash of a specific byte range within
+    ///      the input bytes. It performs bounds checking to ensure the offset and length
+    ///      are valid before hashing.
+    /// @param self The byte string to hash.
+    /// @param offset The position to start hashing at (0-indexed).
+    /// @param len The number of bytes to hash.
+    /// @return ret The Keccak256 hash of the specified byte range.
+    /// @dev Reverts if offset + len exceeds the length of self.
     function keccak(bytes memory self, uint256 offset, uint256 len) internal pure returns (bytes32 ret) {
-        require(offset + len <= self.length);
-        assembly {
+        if (offset + len > self.length) revert BytesOffsetOutOfBounds();
+        assembly ("memory-safe") {
             ret := keccak256(add(add(self, 32), offset), len)
         }
     }
 
-    /*
-    * @dev Returns a positive number if `other` comes lexicographically after
-    *      `self`, a negative number if it comes before, or zero if the
-    *      contents of the two bytes are equal.
-    * @param self The first bytes to compare.
-    * @param other The second bytes to compare.
-    * @return The result of the comparison.
-    */
+    /// @dev Returns a positive number if `other` comes lexicographically after
+    ///      `self`, a negative number if it comes before, or zero if the
+    ///      contents of the two bytes are equal.
+    /// @param self The first bytes to compare.
+    /// @param other The second bytes to compare.
+    /// @return The result of the comparison.
     function compare(bytes memory self, bytes memory other) internal pure returns (int256) {
         return compare(self, 0, self.length, other, 0, other.length);
     }
 
-    /*
-    * @dev Returns a positive number if `other` comes lexicographically after
-    *      `self`, a negative number if it comes before, or zero if the
-    *      contents of the two bytes are equal. Comparison is done per-rune,
-    *      on unicode codepoints.
-    * @param self The first bytes to compare.
-    * @param offset The offset of self.
-    * @param len    The length of self.
-    * @param other The second bytes to compare.
-    * @param otheroffset The offset of the other string.
-    * @param otherlen    The length of the other string.
-    * @return The result of the comparison.
-    */
+    /// @dev Returns a positive number if `other` comes lexicographically after
+    ///      `self`, a negative number if it comes before, or zero if the
+    ///      contents of the two bytes are equal. Comparison is done per-rune,
+    ///      on unicode codepoints.
+    /// @param self The first bytes to compare.
+    /// @param offset The offset of self.
+    /// @param len    The length of self.
+    /// @param other The second bytes to compare.
+    /// @param otheroffset The offset of the other string.
+    /// @param otherlen    The length of the other string.
+    /// @return The result of the comparison.
     function compare(
         bytes memory self,
         uint256 offset,
@@ -60,14 +69,14 @@ library BytesUtils {
         uint256 selfptr;
         uint256 otherptr;
 
-        assembly {
+        assembly ("memory-safe") {
             selfptr := add(self, add(offset, 32))
             otherptr := add(other, add(otheroffset, 32))
         }
         for (uint256 idx = 0; idx < shortest; idx += 32) {
             uint256 a;
             uint256 b;
-            assembly {
+            assembly ("memory-safe") {
                 a := mload(selfptr)
                 b := mload(otherptr)
             }
@@ -91,15 +100,13 @@ library BytesUtils {
         return int256(len) - int256(otherlen);
     }
 
-    /*
-    * @dev Returns true if the two byte ranges are equal.
-    * @param self The first byte range to compare.
-    * @param offset The offset into the first byte range.
-    * @param other The second byte range to compare.
-    * @param otherOffset The offset into the second byte range.
-    * @param len The number of bytes to compare
-    * @return True if the byte ranges are equal, false otherwise.
-    */
+    /// @dev Returns true if the two byte ranges are equal.
+    /// @param self The first byte range to compare.
+    /// @param offset The offset into the first byte range.
+    /// @param other The second byte range to compare.
+    /// @param otherOffset The offset into the second byte range.
+    /// @param len The number of bytes to compare
+    /// @return True if the byte ranges are equal, false otherwise.
     function equals(bytes memory self, uint256 offset, bytes memory other, uint256 otherOffset, uint256 len)
         internal
         pure
@@ -108,14 +115,12 @@ library BytesUtils {
         return keccak(self, offset, len) == keccak(other, otherOffset, len);
     }
 
-    /*
-    * @dev Returns true if the two byte ranges are equal with offsets.
-    * @param self The first byte range to compare.
-    * @param offset The offset into the first byte range.
-    * @param other The second byte range to compare.
-    * @param otherOffset The offset into the second byte range.
-    * @return True if the byte ranges are equal, false otherwise.
-    */
+    /// @dev Returns true if the two byte ranges are equal with offsets.
+    /// @param self The first byte range to compare.
+    /// @param offset The offset into the first byte range.
+    /// @param other The second byte range to compare.
+    /// @param otherOffset The offset into the second byte range.
+    /// @return True if the byte ranges are equal, false otherwise.
     function equals(bytes memory self, uint256 offset, bytes memory other, uint256 otherOffset)
         internal
         pure
@@ -124,86 +129,83 @@ library BytesUtils {
         return keccak(self, offset, self.length - offset) == keccak(other, otherOffset, other.length - otherOffset);
     }
 
-    /*
-    * @dev Compares a range of 'self' to all of 'other' and returns True iff
-    *      they are equal.
-    * @param self The first byte range to compare.
-    * @param offset The offset into the first byte range.
-    * @param other The second byte range to compare.
-    * @return True if the byte ranges are equal, false otherwise.
-    */
+    /// @dev Compares a range of 'self' to all of 'other' and returns True iff
+    ///      they are equal.
+    /// @param self The first byte range to compare.
+    /// @param offset The offset into the first byte range.
+    /// @param other The second byte range to compare.
+    /// @return True if the byte ranges are equal, false otherwise.
     function equals(bytes memory self, uint256 offset, bytes memory other) internal pure returns (bool) {
         return self.length >= offset + other.length && equals(self, offset, other, 0, other.length);
     }
 
-    /*
-    * @dev Returns true if the two byte ranges are equal.
-    * @param self The first byte range to compare.
-    * @param other The second byte range to compare.
-    * @return True if the byte ranges are equal, false otherwise.
-    */
+    /// @dev Returns true if the two byte ranges are equal.
+    /// @param self The first byte range to compare.
+    /// @param other The second byte range to compare.
+    /// @return True if the byte ranges are equal, false otherwise.
     function equals(bytes memory self, bytes memory other) internal pure returns (bool) {
         return self.length == other.length && equals(self, 0, other, 0, self.length);
     }
 
-    /*
-    * @dev Returns the 8-bit number at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes
-    * @return The specified 8 bits of the string, interpreted as an integer.
-    */
-    function readUint8(bytes memory self, uint256 idx) internal pure returns (uint8 ret) {
+    /// @dev Returns the 8-bit number at the specified index of self.
+    /// @param self The byte string.
+    /// @param idx The index into the bytes
+    /// @return The specified 8 bits of the string, interpreted as an integer.
+    function readUint8(bytes memory self, uint256 idx) internal pure returns (uint8) {
         return uint8(self[idx]);
     }
 
-    /*
-    * @dev Returns the 16-bit number at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes
-    * @return The specified 16 bits of the string, interpreted as an integer.
-    */
+    /// @notice Returns the 16-bit unsigned integer at the specified index.
+    /// @dev Reads 2 bytes from the byte string starting at idx and interprets them as a uint16
+    ///      in big-endian format.
+    /// @param self The byte string to read from.
+    /// @param idx The index into the bytes (0-indexed).
+    /// @return ret The 16-bit value at the specified index.
+    /// @dev Reverts if idx + 2 exceeds the length of self.
     function readUint16(bytes memory self, uint256 idx) internal pure returns (uint16 ret) {
-        require(idx + 2 <= self.length);
-        assembly {
+        if (idx + 2 > self.length) revert BytesInsufficientLength();
+        assembly ("memory-safe") {
             ret := and(mload(add(add(self, 2), idx)), 0xFFFF)
         }
     }
 
-    /*
-    * @dev Returns the 32-bit number at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes
-    * @return The specified 32 bits of the string, interpreted as an integer.
-    */
+    /// @notice Returns the 32-bit unsigned integer at the specified index.
+    /// @dev Reads 4 bytes from the byte string starting at idx and interprets them as a uint32
+    ///      in big-endian format.
+    /// @param self The byte string to read from.
+    /// @param idx The index into the bytes (0-indexed).
+    /// @return ret The 32-bit value at the specified index.
+    /// @dev Reverts if idx + 4 exceeds the length of self.
     function readUint32(bytes memory self, uint256 idx) internal pure returns (uint32 ret) {
-        require(idx + 4 <= self.length);
-        assembly {
+        if (idx + 4 > self.length) revert BytesInsufficientLength();
+        assembly ("memory-safe") {
             ret := and(mload(add(add(self, 4), idx)), 0xFFFFFFFF)
         }
     }
 
-    /*
-    * @dev Returns the 32 byte value at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes
-    * @return The specified 32 bytes of the string.
-    */
+    /// @notice Returns the 32-byte value at the specified index.
+    /// @dev Reads 32 bytes from the byte string starting at idx and returns them as a bytes32.
+    /// @param self The byte string to read from.
+    /// @param idx The index into the bytes (0-indexed).
+    /// @return ret The 32-byte value at the specified index.
+    /// @dev Reverts if idx + 32 exceeds the length of self.
     function readBytes32(bytes memory self, uint256 idx) internal pure returns (bytes32 ret) {
-        require(idx + 32 <= self.length);
-        assembly {
+        if (idx + 32 > self.length) revert BytesInsufficientLength();
+        assembly ("memory-safe") {
             ret := mload(add(add(self, 32), idx))
         }
     }
 
-    /*
-    * @dev Returns the 32 byte value at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes
-    * @return The specified 32 bytes of the string.
-    */
+    /// @notice Returns the 20-byte value at the specified index.
+    /// @dev Reads 20 bytes from the byte string starting at idx and returns them as a bytes20
+    ///      (typically used for Ethereum addresses).
+    /// @param self The byte string to read from.
+    /// @param idx The index into the bytes (0-indexed).
+    /// @return ret The 20-byte value at the specified index.
+    /// @dev Reverts if idx + 20 exceeds the length of self.
     function readBytes20(bytes memory self, uint256 idx) internal pure returns (bytes20 ret) {
-        require(idx + 20 <= self.length);
-        assembly {
+        if (idx + 20 > self.length) revert BytesInsufficientLength();
+        assembly ("memory-safe") {
             ret := and(
                 mload(add(add(self, 32), idx)),
                 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000000
@@ -212,13 +214,13 @@ library BytesUtils {
     }
 
     function readBytes8(bytes memory b, uint256 index) internal pure returns (bytes8 result) {
-        require(b.length >= index + 8, "GREATER_OR_EQUAL_TO_8_LENGTH_REQUIRED");
+        if (b.length < index + 8) revert BytesInsufficientLength();
 
         // Arrays are prefixed by a 32 byte length field
         index += 32;
 
         // Read the bytes8 from array memory
-        assembly {
+        assembly ("memory-safe") {
             result := mload(add(b, index))
             // Solidity does not require us to clean the trailing bytes.
             // We do it anyway
@@ -227,17 +229,15 @@ library BytesUtils {
         return result;
     }
 
-    /*
-    * @dev Returns the n byte value at the specified index of self.
-    * @param self The byte string.
-    * @param idx The index into the bytes.
-    * @param len The number of bytes.
-    * @return The specified 32 bytes of the string.
-    */
+    /// @dev Returns the n byte value at the specified index of self.
+    /// @param self The byte string.
+    /// @param idx The index into the bytes.
+    /// @param len The number of bytes.
+    /// @return ret The specified 32 bytes of the string.
     function readBytesN(bytes memory self, uint256 idx, uint256 len) internal pure returns (bytes32 ret) {
-        require(len <= 32);
-        require(idx + len <= self.length);
-        assembly {
+        if (len > 32) revert BytesLengthExceeds32();
+        if (idx + len > self.length) revert BytesInsufficientLength();
+        assembly ("memory-safe") {
             let mask := not(sub(exp(256, sub(32, len)), 1))
             ret := and(mload(add(add(self, 32), idx)), mask)
         }
@@ -246,7 +246,7 @@ library BytesUtils {
     function memcpy(uint256 dest, uint256 src, uint256 len) private pure {
         // Copy word-length chunks while possible
         for (; len >= 32; len -= 32) {
-            assembly {
+            assembly ("memory-safe") {
                 mstore(dest, mload(src))
             }
             dest += 32;
@@ -261,27 +261,25 @@ library BytesUtils {
             mask = 256 ** (32 - len) - 1;
         }
 
-        assembly {
+        assembly ("memory-safe") {
             let srcpart := and(mload(src), not(mask))
             let destpart := and(mload(dest), mask)
             mstore(dest, or(destpart, srcpart))
         }
     }
 
-    /*
-    * @dev Copies a substring into a new byte string.
-    * @param self The byte string to copy from.
-    * @param offset The offset to start copying at.
-    * @param len The number of bytes to copy.
-    */
+    /// @dev Copies a substring into a new byte string.
+    /// @param self The byte string to copy from.
+    /// @param offset The offset to start copying at.
+    /// @param len The number of bytes to copy.
     function substring(bytes memory self, uint256 offset, uint256 len) internal pure returns (bytes memory) {
-        require(offset + len <= self.length);
+        if (offset + len > self.length) revert BytesOffsetOutOfBounds();
 
         bytes memory ret = new bytes(len);
         uint256 dest;
         uint256 src;
 
-        assembly {
+        assembly ("memory-safe") {
             dest := add(ret, 32)
             src := add(add(self, 32), offset)
         }
@@ -292,26 +290,24 @@ library BytesUtils {
 
     // Maps characters from 0x30 to 0x7A to their base32 values.
     // 0xFF represents invalid characters in that range.
-    bytes constant base32HexTable =
+    bytes internal constant base32HexTable =
         hex"00010203040506070809FFFFFFFFFFFFFF0A0B0C0D0E0F101112131415161718191A1B1C1D1E1FFFFFFFFFFFFFFFFFFFFF0A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
 
-    /**
-     * @dev Decodes unpadded base32 data of up to one word in length.
-     * @param self The data to decode.
-     * @param off Offset into the string to start at.
-     * @param len Number of characters to decode.
-     * @return The decoded data, left aligned.
-     */
+    /// @dev Decodes unpadded base32 data of up to one word in length.
+    /// @param self The data to decode.
+    /// @param off Offset into the string to start at.
+    /// @param len Number of characters to decode.
+    /// @return The decoded data, left aligned.
     function base32HexDecodeWord(bytes memory self, uint256 off, uint256 len) internal pure returns (bytes32) {
-        require(len <= 52);
+        if (len > 52) revert BytesLengthExceeds52();
 
         uint256 ret = 0;
         uint8 decoded;
         for (uint256 i = 0; i < len; i++) {
             bytes1 char = self[off + i];
-            require(char >= 0x30 && char <= 0x7A);
+            if (char < 0x30 || char > 0x7A) revert BytesInvalidBase32Char();
             decoded = uint8(base32HexTable[uint256(uint8(char)) - 0x30]);
-            require(decoded <= 0x20);
+            if (decoded > 0x20) revert BytesInvalidBase32DecodedValue();
             if (i == len - 1) {
                 break;
             }
@@ -339,7 +335,7 @@ library BytesUtils {
             ret = (ret << 2) | (decoded >> 3);
             bitlen -= 3;
         } else {
-            revert();
+            revert BytesInvalidBase32Length();
         }
 
         return bytes32(ret << (256 - bitlen));

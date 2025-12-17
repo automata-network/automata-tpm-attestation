@@ -2,7 +2,8 @@
 pragma solidity >=0.8.15;
 
 import "./SetupBase.sol";
-import "../src/types/Crypto.sol";
+import "../src/lib/LibX509.sol";
+import "../src/types/TPMConstants.sol";
 
 contract TPMTest is SetupBase {
     bytes constant TPM_RSA_QUOTE =
@@ -28,16 +29,16 @@ contract TPMTest is SetupBase {
         super.setUp();
     }
 
-    function testTpmRsa() public {
-        Pubkey memory pubkey = RSALib.newRsaPubkey(TPM_RSA_KEY_E, TPM_RSA_KEY_N);
+    function test_TpmRsa() public {
+        CertPubkey memory pubkey = LibX509.newRsaPubkey(TPM_RSA_KEY_N, TPM_RSA_KEY_E);
 
         (bool success, string memory errorMessage) =
-            tpmAttestation.verifyTpmQuote(TPM_RSA_QUOTE, TPM_RSA_SIGNATURE, pubkey);
+            tpmAttestation.verifyTpmQuoteWithTrustedAkPub(TPM_RSA_QUOTE, TPM_RSA_SIGNATURE, pubkey);
 
         assertTrue(success, errorMessage);
     }
 
-    function testTpmWithCertchain() public {
+    function test_TpmWithCertchain() public {
         // pinned July 22, 2025, 1840h UTC+8
         vm.warp(1753180800);
 

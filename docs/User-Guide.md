@@ -57,7 +57,7 @@ TpmAttestation tpmAttestation = new TpmAttestation(owner, p256Verifier);
 ### 1. Deploy Contract
 
 ```solidity
-import {TpmAttestation} from "@automata-tpm-attestation/TpmAttestation.sol";
+import {TpmAttestation} from "@automata-network/automata-tpm-attestation/TpmAttestation.sol";
 
 // Deploy with owner and P256 implementation
 TpmAttestation tpmAttestation = new TpmAttestation(
@@ -98,7 +98,7 @@ function verifyTpmQuote(
 **Example:**
 
 ```solidity
-import {Pubkey} from "@automata-network/automata-tpm-attestation/types/Crypto.sol";
+import {CertPubkey} from "@automata-network/automata-tpm-attestation/lib/LibX509.sol";
 
 bytes[] memory certChain = new bytes[](3);
 certChain[0] = akLeafCert;
@@ -114,19 +114,19 @@ certChain[2] = rootCaCert;
 require(success, "Failed to verify TPM Quote");
 
 // Decode the key
-Pubkey memory ak = abi.decode(encodedAkPub, (Pubkey));
+CertPubkey memory ak = abi.decode(encodedAkPub, (CertPubkey));
 ```
 
-#### `verifyTpmQuote(bytes tpmQuote, bytes tpmSignature, CertPubkey akPub)`
+#### `verifyTpmQuoteWithTrustedAkPub(bytes tpmQuote, bytes tpmSignature, CertPubkey akPub)`
 
 Verifies a TPM quote using a pre-verified Attestation Key (saves gas).
 
 ```solidity
-function verifyTpmQuote(
+function verifyTpmQuoteWithTrustedAkPub(
     bytes calldata tpmQuote,
     bytes calldata tpmSignature,
     CertPubkey calldata akPub    // Pre-verified AK public key
-) external view returns (bool success, string memory errorMessage);
+) external returns (bool success, string memory errorMessage);
 ```
 
 ### Data Extraction & Validation
@@ -198,6 +198,33 @@ function toFinalMeasurement(MeasureablePcr[] calldata tpmPcrs)
 > [!NOTE]
 > The final measurement format of the PCR object can be used for reference as a **Golden Measurement** for CVM Workloads that are built specifically for the intended application.
 
+#### `extractClockInfo(bytes tpmQuote)`
+
+Extracts clock information from a TPM quote for replay protection.
+
+> [!NOTE]
+> This contract does NOT include built-in replay protection. Callers MUST implement their own freshness checks using ClockInfo or other mechanisms (e.g., including block number in extraData).
+
+```solidity
+struct ClockInfo {
+    uint64 clock;        // TPM clock value in milliseconds
+    uint32 resetCount;   // TPM reset count since manufacture
+    uint32 restartCount; // Restart count since last reset
+    bool safe;           // Whether the TPM clock is in a safe state
+}
+
+function extractClockInfo(bytes calldata tpmQuote)
+    external pure returns (ClockInfo memory info);
+```
+
+**Replay Detection Logic:**
+To check if a new ClockInfo is fresher than a previous one:
+1. If `resetCount` > lastSeen: TPM was reset (valid even if clock is smaller)
+2. If `restartCount` > lastSeen (same resetCount): TPM was restarted (valid)
+3. If same reset/restart counts: `clock` must be strictly greater
+4. If any counter is less than lastSeen: indicates rollback (reject)
+5. If all values are equal: indicates replay (reject)
+
 ### Certificate Management (Inherited from CertChainRegistry)
 
 #### `addCA(bytes ca)` / `removeCA(bytes ca)`
@@ -208,9 +235,48 @@ Manage trusted Certificate Authorities (owner only).
 
 Verify a certificate chain against trusted CAs.
 
-#### `verifySignature(bytes32 digest, bytes sig, CertPubkey pubkey)`
+#### `verifyCertSignature(bytes cert, CertPubkey issuer)`
 
-Verify digital signatures (supports RSA and ECDSA).
+Verify a certificate's signature using the issuer's public key (supports RSA and ECDSA).
+
+### CRL (Certificate Revocation List) Management
+
+#### `updateCRL(bytes crl, bytes issuerCert)`
+
+Update the Certificate Revocation List for a specific issuer. This function:
+- Verifies CRL validity period
+- Verifies CRL signature against issuer's public key
+- Validates issuer DN and AKID match
+- Performs anti-rollback checks
+- Syncs revoked certificates to the blacklist
+
+```solidity
+function updateCRL(bytes calldata crl, bytes calldata issuerCert) external;
+```
+
+#### `isCertificateRevoked(bytes cert)`
+
+Check if a certificate has been revoked.
+
+```solidity
+function isCertificateRevoked(bytes calldata cert) external view returns (bool);
+```
+
+#### `setStrictCRLMode(bool enabled)`
+
+Enable or disable strict CRL mode (owner only). When enabled, `verifyCertChain` requires a valid CRL for each issuer in the chain.
+
+```solidity
+function setStrictCRLMode(bool enabled) external;
+```
+
+#### `removeIntermediateCerts(bytes32[] certHashes)`
+
+Remove cached intermediate certificates from the registry (owner only). Used for cache invalidation when intermediate CAs are compromised or retired.
+
+```solidity
+function removeIntermediateCerts(bytes32[] calldata certHashes) external;
+```
 
 ## Integration Guide
 
@@ -219,7 +285,7 @@ Verify digital signatures (supports RSA and ECDSA).
 ```solidity
 pragma solidity ^0.8.20;
 
-import {MeasureablePcr, ITpmAttestation} from "@automata-tpm-attestation/interfaces/ITpmAttestation.sol";
+import {MeasureablePcr, ITpmAttestation} from "@automata-network/automata-tpm-attestation/interfaces/ITpmAttestation.sol";
 
 contract MyApplication {
     ITpmAttestation public immutable tpmAttestation;
@@ -265,8 +331,16 @@ contract MyApplication {
 For gas optimization, you can pre-verify and cache Attestation Keys:
 
 ```solidity
+import {CertPubkey} from "@automata-network/automata-tpm-attestation/lib/LibX509.sol";
+import {ITpmAttestation} from "@automata-network/automata-tpm-attestation/interfaces/ITpmAttestation.sol";
+
 contract OptimizedTpmVerifier {
+    ITpmAttestation public immutable tpmAttestation;
     mapping(bytes32 => CertPubkey) public trustedAKs;
+
+    constructor(address _tpmAttestation) {
+        tpmAttestation = ITpmAttestation(_tpmAttestation);
+    }
 
     function addTrustedAK(
         bytes[] calldata akCertchain,
@@ -280,11 +354,11 @@ contract OptimizedTpmVerifier {
         bytes calldata tpmQuote,
         bytes calldata tpmSignature,
         bytes32 akHash
-    ) external view returns (bool) {
+    ) external returns (bool) {
         CertPubkey memory akPub = trustedAKs[akHash];
         require(akPub.data.length > 0, "AK not trusted");
 
-        (bool success,) = tpmAttestation.verifyTpmQuote(
+        (bool success,) = tpmAttestation.verifyTpmQuoteWithTrustedAkPub(
             tpmQuote,
             tpmSignature,
             akPub

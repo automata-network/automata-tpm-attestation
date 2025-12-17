@@ -35,8 +35,8 @@ The `TpmAttestation` contract extends `CertChainRegistry` to provide a complete 
 
 | Network | Contract Address |
 | --- | --- |
-| Automata Testnet | [0xE9adeC0A00c7386224604b127331fEa32977Fa71](https://explorer-testnet.ata.network/address/0xE9adeC0A00c7386224604b127331fEa32977Fa71) |
-| Sepolia Testnet | [0x870B920d80Bd11BA32661348A00054F19C05a069](https://sepolia.etherscan.io/address/0x870b920d80bd11ba32661348a00054f19c05a069) |
+| Automata Testnet | [0xd8f86325Ea717F167cabc5BF0c5f06Df2E546368](https://explorer-testnet.ata.network/address/0xd8f86325Ea717F167cabc5BF0c5f06Df2E546368) |
+| Sepolia Testnet | [0xd8f86325Ea717F167cabc5BF0c5f06Df2E546368](https://sepolia.etherscan.io/address/0xd8f86325Ea717F167cabc5BF0c5f06Df2E546368) |
 
 ## TPM Attestation Workflow
 
@@ -90,8 +90,9 @@ struct Pcr {
 
 // Public key representation
 struct CertPubkey {
-    uint256 algo;          // Algorithm identifier
-    bytes data;           // Key data
+    uint16 algo;           // Algorithm identifier (TPM_ALG_RSA or TPM_ALG_ECC)
+    uint16 params;         // Algorithm-specific parameters (curve ID for EC, 0 for RSA)
+    bytes data;            // Key data
 }
 ```
 
