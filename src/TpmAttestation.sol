@@ -251,6 +251,28 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         return pcrs;
     }
 
+    /// @notice Extract ClockInfo from TPM quote for caller's own replay protection
+    /// @dev Callers are responsible for implementing their own replay logic if needed.
+    ///      TPMS_CLOCK_INFO layout (17 bytes, big-endian):
+    ///      [0:8]   clock (uint64)
+    ///      [8:12]  resetCount (uint32)
+    ///      [12:16] restartCount (uint32)
+    ///      [16:17] safe (uint8: 0 or 1)
+    /// @param tpmQuote The TPM quote bytes
+    /// @return info The parsed ClockInfo struct including safe flag
+    function extractClockInfo(bytes calldata tpmQuote) external pure returns (ClockInfo memory info) {
+        // Calculate clock_info offset: 10 + qualifiedSignerLen + extraDataLen
+        uint16 qualifiedSignerLen = uint16(bytes2(tpmQuote[6:8]));
+        uint16 extraDataLen = uint16(bytes2(tpmQuote[8 + qualifiedSignerLen:10 + qualifiedSignerLen]));
+        uint256 clockInfoOffset = 10 + qualifiedSignerLen + extraDataLen;
+
+        // TPM uses big-endian encoding
+        info.clock = uint64(bytes8(tpmQuote[clockInfoOffset:clockInfoOffset + 8]));
+        info.resetCount = uint32(bytes4(tpmQuote[clockInfoOffset + 8:clockInfoOffset + 12]));
+        info.restartCount = uint32(bytes4(tpmQuote[clockInfoOffset + 12:clockInfoOffset + 16]));
+        info.safe = uint8(tpmQuote[clockInfoOffset + 16]) == 1;
+    }
+
     function _verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub) private {
         _verifyTpmQuoteSignature(tpmQuote, tpmSignature, akPub);
         emit TpmSignatureVerified(keccak256(tpmQuote));
@@ -352,8 +374,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
 
         for (uint256 i = 0; i < tpmPcrs.length; i++) {
             bytes32 pcrValue = tpmPcrs[i].pcr;
-            // A PCR value of zero is valid if events are provided to reconstruct it.
-            // If no events are provided, the PCR value must not be zero.
+            // If a PCR value is zero, calculate it from events (if provided)
             if (pcrValue == bytes32(0)) {
                 pcrValue = _calculatePcrFromEvents(tpmPcrs[i].allEvents);
             }
@@ -379,27 +400,5 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         }
         // If no events are provided, or no pcr is provided, there's nothing to verify here.
         return true;
-    }
-
-    /// @notice Extract ClockInfo from TPM quote for caller's own replay protection
-    /// @dev Callers are responsible for implementing their own replay logic if needed.
-    ///      TPMS_CLOCK_INFO layout (17 bytes, big-endian):
-    ///      [0:8]   clock (uint64)
-    ///      [8:12]  resetCount (uint32)
-    ///      [12:16] restartCount (uint32)
-    ///      [16:17] safe (uint8: 0 or 1)
-    /// @param tpmQuote The TPM quote bytes
-    /// @return info The parsed ClockInfo struct including safe flag
-    function extractClockInfo(bytes calldata tpmQuote) external pure returns (ClockInfo memory info) {
-        // Calculate clock_info offset: 10 + qualifiedSignerLen + extraDataLen
-        uint16 qualifiedSignerLen = uint16(bytes2(tpmQuote[6:8]));
-        uint16 extraDataLen = uint16(bytes2(tpmQuote[8 + qualifiedSignerLen:10 + qualifiedSignerLen]));
-        uint256 clockInfoOffset = 10 + qualifiedSignerLen + extraDataLen;
-
-        // TPM uses big-endian encoding
-        info.clock = uint64(bytes8(tpmQuote[clockInfoOffset:clockInfoOffset + 8]));
-        info.resetCount = uint32(bytes4(tpmQuote[clockInfoOffset + 8:clockInfoOffset + 12]));
-        info.restartCount = uint32(bytes4(tpmQuote[clockInfoOffset + 12:clockInfoOffset + 16]));
-        info.safe = uint8(tpmQuote[clockInfoOffset + 16]) == 1;
     }
 }
