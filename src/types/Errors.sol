@@ -24,6 +24,16 @@ error InvalidRsaSignatureSize();
 error PcrIndexOutOfRange();
 error RootCaNotAtEndOfChain();
 
+// --- TPM2_Certify Errors ---
+error InvalidTpmMagic();
+error InvalidCertifyAttestType();
+error CertifiedNameMismatch();
+error ExtraDataMismatch();
+error TpmtPublicTooShort();
+error UnsupportedNameAlgorithm();
+error InvalidTpmtPublicType();
+error ParseOffsetOutOfBounds();
+
 // --- Certificate & Crypto Errors ---
 error CertChainVerificationFailed(string reason);
 error CertificateExpired();

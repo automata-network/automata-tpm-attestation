@@ -58,6 +58,15 @@ library TPMConstants {
     uint16 constant TPM_ECC_BN_P638 = 0x0011;
     uint16 constant TPM_ECC_SM2_P256 = 0x0020;
 
+    // TPM_ST (Structure Type) Constants
+    // Table 19 - TPM 2.0 Part 2 Structures
+    uint16 constant TPM_ST_ATTEST_CERTIFY = 0x8017;
+    uint16 constant TPM_ST_ATTEST_QUOTE = 0x8018;
+
+    // TPM Magic Value
+    // Used in TPMS_ATTEST structures to validate TPM-generated data
+    uint32 constant TPM_MAGIC = 0xff544347; // "\xffTCG"
+
     // X.509 Object Identifiers (OIDs)
     // https://oidref.com/2.5.29
     bytes constant OID_BASIC_CONSTRAINTS = hex"551d13";
