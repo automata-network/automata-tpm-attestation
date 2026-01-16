@@ -5,6 +5,7 @@ pragma solidity ^0.8.27;
 import {ITpmAttestation, MeasureablePcr, Pcr, ClockInfo} from "./interfaces/ITpmAttestation.sol";
 import {CertPubkey, SignatureAlgorithm, LibX509} from "./lib/LibX509.sol";
 import {LibX509Verify} from "./lib/LibX509Verify.sol";
+import {LibTpm} from "./lib/LibTpm.sol";
 import {TPMConstants} from "./types/TPMConstants.sol";
 import {CertChainRegistry} from "./bases/CertChainRegistry.sol";
 import {
@@ -12,10 +13,13 @@ import {
     InvalidCertificateChain,
     TpmQuoteTooShort,
     InvalidTpmAttType,
+    InvalidTpmMagic,
     InvalidTpmsPcrCount,
     InvalidEcdsaSignature,
     InvalidSignature,
     TpmSignatureVerificationFailed,
+    CertifiedNameMismatch,
+    ExtraDataMismatch,
     PcrDigestMismatch,
     InvalidPcrDigestSize,
     UnsupportedHashAlgorithm,
@@ -116,7 +120,8 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         override
         returns (bool success, bytes memory extraData)
     {
-        (success,,, extraData) = _readTpmHeaders(tpmQuote);
+        extraData = LibTpm.extractExtraData(tpmQuote);
+        success = true;
     }
 
     /// @notice Validates PCR measurements in a TPM quote against expected values
@@ -142,11 +147,10 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
     {
         uint256 offset;
         {
-            bool success;
             uint16 qualifiedSignerLen;
             uint16 extraDataLen;
-            (success, qualifiedSignerLen, extraDataLen, extraData) = _readTpmHeaders(tpmQuote);
-            require(success, TpmQuoteTooShort());
+            (qualifiedSignerLen, extraDataLen, extraData) =
+                LibTpm.parseAttestHeaders(tpmQuote, TPMConstants.TPM_ST_ATTEST_QUOTE);
             offset = 35 + qualifiedSignerLen + extraDataLen;
         }
 
@@ -250,85 +254,49 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
     /// @param tpmQuote The TPM quote bytes
     /// @return info The parsed ClockInfo struct including safe flag
     function extractClockInfo(bytes calldata tpmQuote) external pure returns (ClockInfo memory info) {
-        // Calculate clock_info offset: 10 + qualifiedSignerLen + extraDataLen
-        uint16 qualifiedSignerLen = uint16(bytes2(tpmQuote[6:8]));
-        uint16 extraDataLen = uint16(bytes2(tpmQuote[8 + qualifiedSignerLen:10 + qualifiedSignerLen]));
-        uint256 clockInfoOffset = 10 + qualifiedSignerLen + extraDataLen;
+        return LibTpm.extractClockInfo(tpmQuote);
+    }
 
-        // TPM uses big-endian encoding
-        info.clock = uint64(bytes8(tpmQuote[clockInfoOffset:clockInfoOffset + 8]));
-        info.resetCount = uint32(bytes4(tpmQuote[clockInfoOffset + 8:clockInfoOffset + 12]));
-        info.restartCount = uint32(bytes4(tpmQuote[clockInfoOffset + 12:clockInfoOffset + 16]));
-        info.safe = uint8(tpmQuote[clockInfoOffset + 16]) == 1;
+    function verifyTpmKeyCertification(
+        bytes calldata certifyInfo,
+        bytes calldata akSignature,
+        bytes calldata tpmtPublic,
+        CertPubkey calldata akPub,
+        bytes calldata expectedExtraData
+    ) external view override returns (CertPubkey memory certifiedPubkey, SignatureAlgorithm memory certifiedSigAlgo) {
+        // Step 1: Parse and verify AK signature over certifyInfo
+        (SignatureAlgorithm memory akSigAlgo, bytes memory sig) = LibTpm.parseTpmSignature(akSignature);
+        require(akPub.verifySignature(akSigAlgo, certifyInfo, sig, p256), TpmSignatureVerificationFailed());
+
+        // Step 2: Parse certifyInfo and extract fields
+        (bytes memory extraData, bytes memory certifiedName) = LibTpm.parseCertifyInfo(certifyInfo);
+
+        // Step 3: Compare KEY_NAME
+        bytes memory expectedName = LibTpm.computeKeyName(tpmtPublic);
+        require(keccak256(certifiedName) == keccak256(expectedName), CertifiedNameMismatch());
+
+        // Step 4: Validate extraData if provided
+        if (expectedExtraData.length != 0) {
+            require(keccak256(extraData) == keccak256(expectedExtraData), ExtraDataMismatch());
+        }
+
+        // Step 5: Extract and return certified public key + signature algorithm
+        (certifiedPubkey, certifiedSigAlgo) = LibTpm.extractPubkeyAndSigAlgo(tpmtPublic);
     }
 
     function _verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub) private {
-        _verifyTpmQuoteSignature(tpmQuote, tpmSignature, akPub);
-        emit TpmSignatureVerified(keccak256(tpmQuote));
-    }
+        // Use library function for signature parsing (fixes ECDSA length bug: 40 -> 72)
+        (SignatureAlgorithm memory sigAlgo, bytes memory sig) = LibTpm.parseTpmSignature(tpmSignature);
 
-    function _verifyTpmQuoteSignature(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub)
-        private
-        view
-    {
-        require(tpmSignature.length >= 6, TpmSignatureTooShort());
-
-        SignatureAlgorithm memory sigAlgo;
-        sigAlgo.scheme = uint16(bytes2(tpmSignature[0:2]));
-        sigAlgo.hashAlgo = uint16(bytes2(tpmSignature[2:4]));
-        uint16 sigSize = uint16(bytes2(tpmSignature[4:6]));
-
+        // Validate hash algorithm is SHA256
         require(sigAlgo.hashAlgo == TPMConstants.TPM_ALG_SHA256, UnsupportedHashAlgorithm());
-
-        bytes memory sig;
-        if (sigAlgo.scheme == TPMConstants.TPM_ALG_RSASSA) {
-            require(sigSize >= 256 && sigSize <= 512, InvalidRsaSignatureSize());
-            require(tpmSignature.length >= 6 + sigSize, TpmSignatureTooShort());
-            sig = tpmSignature[6:6 + sigSize];
-        } else if (sigAlgo.scheme == TPMConstants.TPM_ALG_ECDSA) {
-            // TPM ECDSA signature format:
-            // [sigAlg: 2 bytes][hashAlg: 2 bytes][sigSize (r size): 2 bytes][r: 32 bytes][sSize: 2 bytes][s: 32 bytes]
-            require(tpmSignature.length >= 40, TpmSignatureTooShort());
-            require(sigSize == 32, InvalidEcdsaSignature());
-            uint16 sSize = uint16(bytes2(tpmSignature[6 + sigSize:8 + sigSize]));
-            require(sSize == 32, InvalidEcdsaSignature());
-            // Extract r and s from calldata
-            // r is at position 6 (after sigAlg(2) + hashAlg(2) + sigSize(2))
-            // s is at position 40 (6 + r(32) + sSize(2))
-            bytes32 r = bytes32(tpmSignature[6:38]);
-            bytes32 s = bytes32(tpmSignature[40:72]);
-
-            sig = LibX509.encodeEcdsaSignature(r, s);
-        } else {
-            revert InvalidSignature();
-        }
 
         address verifier = sigAlgo.scheme == TPMConstants.TPM_ALG_ECDSA ? p256 : address(0);
         bool result = akPub.verifySignature(sigAlgo, tpmQuote, sig, verifier);
 
         require(result, TpmSignatureVerificationFailed());
-    }
 
-    function _readTpmHeaders(bytes calldata tpmQuote)
-        private
-        pure
-        returns (bool success, uint16 qualifiedSignerLen, uint16 extraDataLen, bytes memory retData)
-    {
-        require(tpmQuote.length >= 10, TpmQuoteTooShort());
-        uint16 attType = uint16(bytes2(tpmQuote[4:6]));
-        require(attType == 0x8018, InvalidTpmAttType());
-
-        qualifiedSignerLen = uint16(bytes2(tpmQuote[6:8]));
-        require(tpmQuote.length >= 10 + qualifiedSignerLen, TpmQuoteTooShort());
-        extraDataLen = uint16(bytes2(tpmQuote[8 + qualifiedSignerLen:10 + qualifiedSignerLen]));
-        require(tpmQuote.length >= 10 + qualifiedSignerLen + extraDataLen, TpmQuoteTooShort());
-
-        // Ensure there's enough space for the minimum required fields after headers:
-        // clock_info (17 bytes) + firmware_version (8 bytes) = 25 bytes minimum
-        require(tpmQuote.length >= 35 + qualifiedSignerLen + extraDataLen, TpmQuoteTooShort());
-
-        retData = tpmQuote[10 + qualifiedSignerLen:10 + qualifiedSignerLen + extraDataLen];
-        success = true;
+        emit TpmSignatureVerified(keccak256(tpmQuote));
     }
 
     function _compactSelections(MeasureablePcr[] calldata tpmPcrs) private pure returns (bytes4) {

@@ -5,9 +5,11 @@ pragma solidity ^0.8.15;
 import {CertPubkey, SignatureAlgorithm, LibX509} from "./LibX509.sol";
 import {LibX509Verify} from "./LibX509Verify.sol";
 import {TPMConstants} from "../types/TPMConstants.sol";
+import {ClockInfo} from "../interfaces/ITpmAttestation.sol";
 import {
     InvalidTpmMagic,
     InvalidCertifyAttestType,
+    InvalidTpmAttType,
     CertifiedNameMismatch,
     ExtraDataMismatch,
     TpmtPublicTooShort,
@@ -21,12 +23,9 @@ import {
     UnsupportedSignatureScheme
 } from "../types/Errors.sol";
 
-/// @title LibTpmCertify
-/// @notice Library for verifying TPM2_Certify attestations
-/// @dev Implements verification that a key is certified by a TPM's Attestation Key,
-///      proving the key is bound to the same TPM hardware and cannot be exported.
-/// @custom:security-contact security@ata.network
-library LibTpmCertify {
+/// @title LibTpm
+/// @notice TPM utility library
+library LibTpm {
     using LibX509Verify for CertPubkey;
 
     /// @notice Parses a TPM signature (TPMT_SIGNATURE format)
@@ -41,7 +40,7 @@ library LibTpmCertify {
         pure
         returns (SignatureAlgorithm memory sigAlgo, bytes memory signature)
     {
-        if (tpmSignature.length < 6) revert TpmSignatureTooShort();
+        require(tpmSignature.length >= 6, TpmSignatureTooShort());
 
         // Extract signature scheme and hash algorithm
         sigAlgo.scheme = uint16(bytes2(tpmSignature[0:2]));
@@ -50,18 +49,18 @@ library LibTpmCertify {
         if (sigAlgo.scheme == TPMConstants.TPM_ALG_RSASSA) {
             // RSA signature format: [scheme][hashAlg][size][signature]
             uint16 sigSize = uint16(bytes2(tpmSignature[4:6]));
-            if (sigSize < 256 || sigSize > 512) revert InvalidRsaSignatureSize();
-            if (tpmSignature.length < 6 + sigSize) revert TpmSignatureTooShort();
+            require(sigSize >= 256 && sigSize <= 512, InvalidRsaSignatureSize());
+            require(tpmSignature.length >= 6 + sigSize, TpmSignatureTooShort());
             signature = tpmSignature[6:6 + sigSize];
         } else if (sigAlgo.scheme == TPMConstants.TPM_ALG_ECDSA) {
             // ECDSA signature format: [scheme][hashAlg][r.size][r][s.size][s]
-            if (tpmSignature.length < 72) revert InvalidEcdsaSignature();
+            require(tpmSignature.length >= 72, InvalidEcdsaSignature());
 
             uint16 rSize = uint16(bytes2(tpmSignature[4:6]));
-            if (rSize != 32) revert InvalidEcdsaSignature();
+            require(rSize == 32, InvalidEcdsaSignature());
 
             uint16 sSize = uint16(bytes2(tpmSignature[38:40]));
-            if (sSize != 32) revert InvalidEcdsaSignature();
+            require(sSize == 32, InvalidEcdsaSignature());
 
             // Extract r and s components
             bytes32 r = bytes32(tpmSignature[6:38]);
@@ -74,50 +73,72 @@ library LibTpmCertify {
         }
     }
 
-    /// @notice Verifies a TPM2_Certify attestation proving a key is bound to the same TPM as the AK
-    /// @dev Performs 4-step verification:
-    ///      1. Verify AK signature over certifyInfo
-    ///      2. Parse certifyInfo and validate magic/type
-    ///      3. Validate extraData and compare KEY_NAME
-    ///      4. Extract and return certified public key + signature algorithm
-    /// @param certifyInfo Raw TPMS_ATTEST bytes from TPM2_Certify
-    /// @param akSignature TPMT_SIGNATURE bytes from TPM2_Certify
-    /// @param tpmtPublic Marshalled TPMT_PUBLIC of the certified key
-    /// @param akPub The trusted Attestation Key public key
-    /// @param expectedExtraData Optional: Expected extraData for replay protection
-    /// @param ecdsaP256Verifier Address of P256 verifier contract
-    /// @return certifiedPubkey The certified key extracted as CertPubkey
-    /// @return certifiedSigAlgo The signature algorithm for the certified key
-    function verifyTpmKeyCertification(
-        bytes calldata certifyInfo,
-        bytes calldata akSignature,
-        bytes calldata tpmtPublic,
-        CertPubkey memory akPub,
-        bytes calldata expectedExtraData,
-        address ecdsaP256Verifier
-    ) internal view returns (CertPubkey memory certifiedPubkey, SignatureAlgorithm memory certifiedSigAlgo) {
-        // Step 1: Parse and verify AK signature over certifyInfo
-        (SignatureAlgorithm memory akSigAlgo, bytes memory sig) = parseTpmSignature(akSignature);
-        bool sigValid = akPub.verifySignature(akSigAlgo, certifyInfo, sig, ecdsaP256Verifier);
-        if (!sigValid) revert TpmSignatureVerificationFailed();
+    /// @notice Generic parser for TPMS_ATTEST header (works for all attestation types)
+    /// @dev Parses the common header fields present in all TPMS_ATTEST structures:
+    ///      magic(4) + type(2) + qualifiedSigner(TPM2B) + extraData(TPM2B)
+    /// @param attest The raw TPMS_ATTEST bytes (quote, certify, etc.)
+    /// @param expectedType The expected attestation type (0 to skip validation)
+    /// @return qualifiedSignerLen Length of qualifiedSigner field
+    /// @return extraDataLen Length of extraData field
+    /// @return extraData The extracted extraData bytes
+    function parseAttestHeaders(bytes calldata attest, uint16 expectedType)
+        internal
+        pure
+        returns (uint16 qualifiedSignerLen, uint16 extraDataLen, bytes memory extraData)
+    {
+        require(attest.length >= 10, TpmtPublicTooShort());
 
-        // Step 2: Parse certifyInfo and extract fields
-        (bytes memory extraData, bytes memory certifiedName) = parseCertifyInfo(certifyInfo);
+        // Validate TPM_MAGIC
+        uint32 magic = uint32(bytes4(attest[0:4]));
+        require(magic == TPMConstants.TPM_MAGIC, InvalidTpmMagic());
 
-        // Step 3: Compare KEY_NAME
-        bytes memory expectedName = computeKeyName(tpmtPublic);
-        if (keccak256(certifiedName) != keccak256(expectedName)) {
-            revert CertifiedNameMismatch();
+        // Optionally validate type (pass 0 to skip)
+        if (expectedType != 0) {
+            uint16 attType = uint16(bytes2(attest[4:6]));
+            require(attType == expectedType, InvalidTpmAttType());
         }
 
-        if (expectedExtraData.length != 0) {
-            if (keccak256(extraData) != keccak256(expectedExtraData)) {
-                revert ExtraDataMismatch();
-            }
-        }
+        // Parse common fields (works for ALL TPMS_ATTEST types)
+        qualifiedSignerLen = uint16(bytes2(attest[6:8]));
+        require(attest.length >= 10 + qualifiedSignerLen, TpmtPublicTooShort());
 
-        // Step 4: Extract and return certified public key + signature algorithm
-        (certifiedPubkey, certifiedSigAlgo) = extractPubkeyAndSigAlgo(tpmtPublic);
+        extraDataLen = uint16(bytes2(attest[8 + qualifiedSignerLen:10 + qualifiedSignerLen]));
+        require(attest.length >= 10 + qualifiedSignerLen + extraDataLen, TpmtPublicTooShort());
+
+        // Ensure clockInfo + firmwareVersion are present (25 bytes minimum)
+        require(attest.length >= 35 + qualifiedSignerLen + extraDataLen, TpmtPublicTooShort());
+
+        extraData = attest[10 + qualifiedSignerLen:10 + qualifiedSignerLen + extraDataLen];
+    }
+
+    /// @notice Extracts extraData from any TPMS_ATTEST structure
+    /// @dev Works for all attestation types (quote, certify, etc.)
+    /// @param attest The raw TPMS_ATTEST bytes
+    /// @return extraData The extracted extraData field for replay protection
+    function extractExtraData(bytes calldata attest) internal pure returns (bytes memory extraData) {
+        (,, extraData) = parseAttestHeaders(attest, 0);
+    }
+
+    /// @notice Extracts ClockInfo from any TPMS_ATTEST structure
+    /// @dev Works for all attestation types (quote, certify, etc.)
+    ///      TPMS_CLOCK_INFO layout (17 bytes, big-endian):
+    ///      [0:8]   clock (uint64)
+    ///      [8:12]  resetCount (uint32)
+    ///      [12:16] restartCount (uint32)
+    ///      [16:17] safe (uint8: 0 or 1)
+    /// @param attest The raw TPMS_ATTEST bytes
+    /// @return info The parsed ClockInfo struct including safe flag
+    function extractClockInfo(bytes calldata attest) internal pure returns (ClockInfo memory info) {
+        (uint16 qualifiedSignerLen, uint16 extraDataLen,) = parseAttestHeaders(attest, 0);
+
+        // Calculate clock_info offset: 10 + qualifiedSignerLen + extraDataLen
+        uint256 clockInfoOffset = 10 + qualifiedSignerLen + extraDataLen;
+
+        // TPM uses big-endian encoding
+        info.clock = uint64(bytes8(attest[clockInfoOffset:clockInfoOffset + 8]));
+        info.resetCount = uint32(bytes4(attest[clockInfoOffset + 8:clockInfoOffset + 12]));
+        info.restartCount = uint32(bytes4(attest[clockInfoOffset + 12:clockInfoOffset + 16]));
+        info.safe = uint8(attest[clockInfoOffset + 16]) == 1;
     }
 
     /// @notice Parse TPMS_ATTEST structure for CERTIFY type (0x8017)
@@ -132,39 +153,20 @@ library LibTpmCertify {
         pure
         returns (bytes memory extraData, bytes memory certifiedName)
     {
-        if (certifyInfo.length < 10) revert TpmtPublicTooShort();
+        // Use generic parser to validate and extract common fields
+        uint16 qualifiedSignerLen;
+        uint16 extraDataLen;
+        (qualifiedSignerLen, extraDataLen, extraData) =
+            parseAttestHeaders(certifyInfo, TPMConstants.TPM_ST_ATTEST_CERTIFY);
 
-        // Validate magic (0xff544347 = "\xffTCG")
-        uint32 magic = uint32(bytes4(certifyInfo[0:4]));
-        if (magic != TPMConstants.TPM_MAGIC) revert InvalidTpmMagic();
-
-        // Validate type (0x8017 = TPM_ST_ATTEST_CERTIFY)
-        uint16 attType = uint16(bytes2(certifyInfo[4:6]));
-        if (attType != TPMConstants.TPM_ST_ATTEST_CERTIFY) revert InvalidCertifyAttestType();
-
-        uint256 offset = 6;
-
-        // Skip qualifiedSigner (TPM2B_NAME)
-        if (offset + 2 > certifyInfo.length) revert ParseOffsetOutOfBounds();
-        uint16 qsLen = uint16(bytes2(certifyInfo[offset:offset + 2]));
-        offset += 2 + qsLen;
-
-        // Extract extraData (TPM2B_DATA)
-        if (offset + 2 > certifyInfo.length) revert ParseOffsetOutOfBounds();
-        uint16 edLen = uint16(bytes2(certifyInfo[offset:offset + 2]));
-        offset += 2;
-        if (offset + edLen > certifyInfo.length) revert ParseOffsetOutOfBounds();
-        extraData = certifyInfo[offset:offset + edLen];
-        offset += edLen;
-
-        // Skip clockInfo (17 bytes) + firmwareVersion (8 bytes)
-        offset += 25;
+        // Calculate offset to attested.name (after clockInfo + firmwareVersion)
+        uint256 offset = 10 + qualifiedSignerLen + extraDataLen + 25;
 
         // Extract attested.name (TPM2B_NAME)
-        if (offset + 2 > certifyInfo.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= certifyInfo.length, ParseOffsetOutOfBounds());
         uint16 nameLen = uint16(bytes2(certifyInfo[offset:offset + 2]));
         offset += 2;
-        if (offset + nameLen > certifyInfo.length) revert ParseOffsetOutOfBounds();
+        require(offset + nameLen <= certifyInfo.length, ParseOffsetOutOfBounds());
         certifiedName = certifyInfo[offset:offset + nameLen];
     }
 
@@ -174,17 +176,14 @@ library LibTpmCertify {
     /// @param tpmtPublic The marshalled TPMT_PUBLIC bytes
     /// @return name The computed KEY_NAME (typically 34 bytes: 2-byte alg + 32-byte hash)
     function computeKeyName(bytes calldata tpmtPublic) internal pure returns (bytes memory name) {
-        if (tpmtPublic.length < 4) revert TpmtPublicTooShort();
+        require(tpmtPublic.length >= 4, TpmtPublicTooShort());
 
         // Extract nameAlg from bytes [2:4]
         uint16 nameAlg = uint16(bytes2(tpmtPublic[2:4]));
 
-        if (nameAlg == TPMConstants.TPM_ALG_SHA256) {
-            bytes32 hash = sha256(tpmtPublic);
-            name = abi.encodePacked(nameAlg, hash);
-        } else {
-            revert UnsupportedNameAlgorithm();
-        }
+        require(nameAlg == TPMConstants.TPM_ALG_SHA256, UnsupportedNameAlgorithm());
+        bytes32 hash = sha256(tpmtPublic);
+        name = abi.encodePacked(nameAlg, hash);
     }
 
     /// @notice Extracts public key and signature algorithm from TPMT_PUBLIC
@@ -197,7 +196,7 @@ library LibTpmCertify {
         pure
         returns (CertPubkey memory pubkey, SignatureAlgorithm memory sigAlgo)
     {
-        if (tpmtPublic.length < 10) revert TpmtPublicTooShort();
+        require(tpmtPublic.length >= 10, TpmtPublicTooShort());
 
         uint16 keyType = uint16(bytes2(tpmtPublic[0:2]));
 
@@ -205,7 +204,7 @@ library LibTpmCertify {
         uint256 offset = 8;
 
         // Skip authPolicy (TPM2B)
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
         uint16 apLen = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2 + apLen;
 
@@ -229,7 +228,7 @@ library LibTpmCertify {
         returns (CertPubkey memory pubkey, SignatureAlgorithm memory sigAlgo)
     {
         // TPMS_ECC_PARMS: symmetric(2+) + scheme(2+) + curveID(2) + kdf(2+)
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
 
         // Parse symmetric
         uint16 symmetricAlgo = uint16(bytes2(tpmtPublic[offset:offset + 2]));
@@ -240,24 +239,24 @@ library LibTpmCertify {
         }
 
         // Parse scheme
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
         sigAlgo.scheme = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
 
         if (sigAlgo.scheme != TPMConstants.TPM_ALG_NULL) {
             // Extract hashAlg
-            if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+            require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
             sigAlgo.hashAlgo = uint16(bytes2(tpmtPublic[offset:offset + 2]));
             offset += 2;
         }
 
         // Extract curveID
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
         uint16 curveID = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
 
         // Skip kdf
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
         uint16 kdfScheme = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
         if (kdfScheme != TPMConstants.TPM_ALG_NULL) {
@@ -265,22 +264,22 @@ library LibTpmCertify {
         }
 
         // Extract x coordinate (TPM2B)
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
         uint16 xLen = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
-        if (offset + xLen > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + xLen <= tpmtPublic.length, ParseOffsetOutOfBounds());
         bytes memory xBytes = tpmtPublic[offset:offset + xLen];
         offset += xLen;
 
         // Extract y coordinate (TPM2B)
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
         uint16 yLen = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
-        if (offset + yLen > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + yLen <= tpmtPublic.length, ParseOffsetOutOfBounds());
         bytes memory yBytes = tpmtPublic[offset:offset + yLen];
 
         // Build uncompressed EC point (0x04 || x || y)
-        if (xLen != 32 || yLen != 32) revert InvalidTpmtPublicType();
+        require(xLen == 32 && yLen == 32, InvalidTpmtPublicType());
         bytes memory ecPoint = abi.encodePacked(uint8(0x04), xBytes, yBytes);
 
         pubkey = CertPubkey({algo: TPMConstants.TPM_ALG_ECC, params: curveID, data: ecPoint});
@@ -297,7 +296,7 @@ library LibTpmCertify {
         returns (CertPubkey memory pubkey, SignatureAlgorithm memory sigAlgo)
     {
         // TPMS_RSA_PARMS: symmetric(2+) + scheme(2+) + keyBits(2) + exponent(4)
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
 
         // Parse symmetric
         uint16 symmetricAlgo = uint16(bytes2(tpmtPublic[offset:offset + 2]));
@@ -307,13 +306,13 @@ library LibTpmCertify {
         }
 
         // Parse scheme
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
         sigAlgo.scheme = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
 
         if (sigAlgo.scheme != TPMConstants.TPM_ALG_NULL) {
             // Extract hashAlg
-            if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+            require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
             sigAlgo.hashAlgo = uint16(bytes2(tpmtPublic[offset:offset + 2]));
             offset += 2;
         }
@@ -322,7 +321,7 @@ library LibTpmCertify {
         offset += 2;
 
         // Parse exponent (uint32, 0 means 65537)
-        if (offset + 4 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 4 <= tpmtPublic.length, ParseOffsetOutOfBounds());
         uint32 exponentValue = uint32(bytes4(tpmtPublic[offset:offset + 4]));
         offset += 4;
 
@@ -340,10 +339,10 @@ library LibTpmCertify {
         }
 
         // Extract modulus (TPM2B_PUBLIC_KEY_RSA)
-        if (offset + 2 > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
         uint16 nLen = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
-        if (offset + nLen > tpmtPublic.length) revert ParseOffsetOutOfBounds();
+        require(offset + nLen <= tpmtPublic.length, ParseOffsetOutOfBounds());
         bytes memory n = tpmtPublic[offset:offset + nLen];
 
         // Use LibX509.newRsaPubkey to create DER-encoded public key

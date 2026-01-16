@@ -38,6 +38,7 @@ struct Pcr {
 }
 
 import {ICertChainRegistry, CertPubkey} from "./ICertChainRegistry.sol";
+import {SignatureAlgorithm} from "../lib/LibX509.sol";
 
 /// @title TPMS_CLOCK_INFO structure from TPM quote
 /// @notice Can be used by callers for their own replay detection logic
@@ -113,4 +114,20 @@ interface ITpmAttestation is ICertChainRegistry {
     /// @param tpmQuote - The TPM quote bytes
     /// @return info - The parsed ClockInfo struct including safe flag
     function extractClockInfo(bytes calldata tpmQuote) external pure returns (ClockInfo memory info);
+
+    /// @notice Verifies a TPM2_Certify attestation proving a key is bound to the same TPM as the AK
+    /// @param certifyInfo Raw TPMS_ATTEST bytes from TPM2_Certify
+    /// @param akSignature TPMT_SIGNATURE bytes from TPM2_Certify
+    /// @param tpmtPublic Marshalled TPMT_PUBLIC of the certified key
+    /// @param akPub The trusted Attestation Key public key
+    /// @param expectedExtraData Optional: Expected extraData for replay protection (empty to skip)
+    /// @return certifiedPubkey The certified key extracted as CertPubkey
+    /// @return certifiedSigAlgo The signature algorithm for the certified key
+    function verifyTpmKeyCertification(
+        bytes calldata certifyInfo,
+        bytes calldata akSignature,
+        bytes calldata tpmtPublic,
+        CertPubkey calldata akPub,
+        bytes calldata expectedExtraData
+    ) external view returns (CertPubkey memory certifiedPubkey, SignatureAlgorithm memory certifiedSigAlgo);
 }
