@@ -109,12 +109,6 @@ interface ITpmAttestation is ICertChainRegistry {
     /// @return pcrs - The final PCR measurement format
     function toFinalMeasurement(MeasureablePcr[] calldata tpmPcrs) external pure returns (Pcr[] memory);
 
-    /// @notice Extract ClockInfo from TPM quote for caller's own replay protection
-    /// @dev Callers are responsible for implementing their own replay logic if needed.
-    /// @param tpmQuote - The TPM quote bytes
-    /// @return info - The parsed ClockInfo struct including safe flag
-    function extractClockInfo(bytes calldata tpmQuote) external pure returns (ClockInfo memory info);
-
     /// @notice Verifies a TPM2_Certify attestation proving a key is bound to the same TPM as the AK
     /// @param certifyInfo Raw TPMS_ATTEST bytes from TPM2_Certify
     /// @param akSignature TPMT_SIGNATURE bytes from TPM2_Certify

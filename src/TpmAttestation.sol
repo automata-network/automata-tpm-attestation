@@ -154,29 +154,30 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
             offset = 35 + qualifiedSignerLen + extraDataLen;
         }
 
-        require(tpmQuote.length >= offset + 4, TpmQuoteTooShort());
+        // Upfront check for minimum fixed-size fields: 4 (count) + 2 (hash) + 1 (size)
+        require(tpmQuote.length >= offset + 7, TpmQuoteTooShort());
+
         uint32 tpmsPCRCount = uint32(bytes4(tpmQuote[offset:offset + 4]));
         require(tpmsPCRCount == 1, InvalidTpmsPcrCount());
         offset += 4;
 
-        require(tpmQuote.length >= offset + 2, TpmQuoteTooShort());
         uint16 tpmPcrHash = uint16(bytes2(tpmQuote[offset:offset + 2]));
         require(tpmPcrHash == TPMConstants.TPM_ALG_SHA256, UnsupportedHashAlgorithm());
         offset += 2;
 
-        require(tpmQuote.length >= offset + 1, TpmQuoteTooShort());
         uint8 pcrsSize = uint8(tpmQuote[offset]);
-        require(tpmQuote.length >= offset + 1 + pcrsSize, TpmQuoteTooShort());
-        bytes4 pcrSelection = bytes4(tpmQuote[offset + 1:offset + 1 + pcrsSize]);
-        require(pcrSelection == _compactSelections(tpmPcrs), PcrSelectionMismatch());
-        offset += 1 + pcrsSize;
+        offset += 1;
 
-        require(tpmQuote.length >= offset + 2, TpmQuoteTooShort());
+        // Check for remaining data: pcrsSize + 2 (digest size field) + 32 (digest bytes)
+        require(tpmQuote.length >= offset + pcrsSize + 34, TpmQuoteTooShort());
+
+        bytes4 pcrSelection = bytes4(tpmQuote[offset:offset + pcrsSize]);
+        require(pcrSelection == _compactSelections(tpmPcrs), PcrSelectionMismatch());
+        offset += pcrsSize;
+
         uint16 pcrDigestSize = uint16(bytes2(tpmQuote[offset:offset + 2]));
         require(pcrDigestSize == 32, InvalidPcrDigestSize());
         offset += 2;
-
-        require(tpmQuote.length >= offset + pcrDigestSize, TpmQuoteTooShort());
         bytes32 pcrDigest = bytes32(tpmQuote[offset:offset + pcrDigestSize]);
         bytes32 expectedDigest = _digest(tpmPcrs);
         require(pcrDigest == expectedDigest, PcrDigestMismatch());
@@ -242,19 +243,6 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         }
 
         return pcrs;
-    }
-
-    /// @notice Extract ClockInfo from TPM quote for caller's own replay protection
-    /// @dev Callers are responsible for implementing their own replay logic if needed.
-    ///      TPMS_CLOCK_INFO layout (17 bytes, big-endian):
-    ///      [0:8]   clock (uint64)
-    ///      [8:12]  resetCount (uint32)
-    ///      [12:16] restartCount (uint32)
-    ///      [16:17] safe (uint8: 0 or 1)
-    /// @param tpmQuote The TPM quote bytes
-    /// @return info The parsed ClockInfo struct including safe flag
-    function extractClockInfo(bytes calldata tpmQuote) external pure returns (ClockInfo memory info) {
-        return LibTpm.extractClockInfo(tpmQuote);
     }
 
     function verifyTpmKeyCertification(
