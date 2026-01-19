@@ -263,10 +263,11 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         bytes calldata tpmtPublic,
         CertPubkey calldata akPub,
         bytes calldata expectedExtraData
-    ) external view override returns (CertPubkey memory certifiedPubkey, SignatureAlgorithm memory certifiedSigAlgo) {
+    ) external view override returns (CertPubkey memory certifiedPubkey) {
         // Step 1: Parse and verify AK signature over certifyInfo
         (SignatureAlgorithm memory akSigAlgo, bytes memory sig) = LibTpm.parseTpmSignature(akSignature);
-        require(akPub.verifySignature(akSigAlgo, certifyInfo, sig, p256), TpmSignatureVerificationFailed());
+        address verifier = akSigAlgo.scheme == TPMConstants.TPM_ALG_ECDSA ? p256 : address(0);
+        require(akPub.verifySignature(akSigAlgo, certifyInfo, sig, verifier), TpmSignatureVerificationFailed());
 
         // Step 2: Parse certifyInfo and extract fields
         (bytes memory extraData, bytes memory certifiedName) = LibTpm.parseCertifyInfo(certifyInfo);
@@ -280,8 +281,8 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
             require(keccak256(extraData) == keccak256(expectedExtraData), ExtraDataMismatch());
         }
 
-        // Step 5: Extract and return certified public key + signature algorithm
-        (certifiedPubkey, certifiedSigAlgo) = LibTpm.extractPubkeyAndSigAlgo(tpmtPublic);
+        // Step 5: Extract and return certified public key
+        certifiedPubkey = LibTpm.extractCertPubkey(tpmtPublic);
     }
 
     function _verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub) private {

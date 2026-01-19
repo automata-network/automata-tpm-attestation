@@ -1,0 +1,36 @@
+=== TPM VM Identity Certification Summary ===
+
+Generated: 2026-01-17 09:48:25 UTC
+Cloud Provider: gcp
+
+=== Certification Components ===
+Attestation Data (TPMS_ATTEST): 158 bytes
+Signature (r||s): 72 bytes
+AK Certificate: 1353 bytes
+AK Public Key: 65 bytes
+VM Identity Name: 34 bytes
+VM Identity Public (TPMT_PUBLIC): 118 bytes
+Qualifying Data: 17 bytes
+
+=== Hex Dumps (First 32 bytes) ===
+Attestation Data: ff54434780170022000bfcfe66bdb1638cd229346f8b81562ee2f6742a01a9e5...
+Signature: 0018000b00209565aef3ea68ffea5568f54aa1377d03d44685b02f35573193f0...
+VM Identity Name: 000bc3e8247d02887a7eda46239396d306929beaa8c9eeca6bc11c2a6d9ff72f...
+Qualifying Data: 0102030405060708091011121314151617
+
+=== File Locations ===
+signature: certification_test_data/attestation_signature_20260117_094825.bin
+ak_certificate: certification_test_data/ak_certificate_20260117_094825.der
+ak_public_key: certification_test_data/ak_public_key_20260117_094825.bin
+vm_identity_name: certification_test_data/vm_identity_name_20260117_094825.bin
+vm_identity_public: certification_test_data/vm_identity_public_20260117_094825.bin
+qualifying_data: certification_test_data/qualifying_data_20260117_094825.bin
+certification_json: certification_test_data/certification_info_20260117_094825.json
+attestation_data: certification_test_data/attestation_data_20260117_094825.bin
+
+=== Verification Notes ===
+1. Attestation Data contains TPMS_ATTEST structure with VM identity key name
+2. Signature is ECDSA signature over attestation data by AK
+3. AK Certificate provides chain of trust to TPM vendor
+4. VM Identity Name is cryptographic identifier of certified key
+5. This proves VM identity key resides in same TPM as AK

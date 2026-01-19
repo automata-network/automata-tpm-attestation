@@ -186,16 +186,11 @@ library LibTpm {
         name = abi.encodePacked(nameAlg, hash);
     }
 
-    /// @notice Extracts public key and signature algorithm from TPMT_PUBLIC
+    /// @notice Extracts CertPubkey from TPMT_PUBLIC
     /// @dev Handles both ECC and RSA key types
     /// @param tpmtPublic The marshalled TPMT_PUBLIC bytes
     /// @return pubkey The public key as CertPubkey
-    /// @return sigAlgo The signature algorithm (scheme + hashAlg from TPMT_PUBLIC)
-    function extractPubkeyAndSigAlgo(bytes calldata tpmtPublic)
-        internal
-        pure
-        returns (CertPubkey memory pubkey, SignatureAlgorithm memory sigAlgo)
-    {
+    function extractCertPubkey(bytes calldata tpmtPublic) internal pure returns (CertPubkey memory pubkey) {
         require(tpmtPublic.length >= 10, TpmtPublicTooShort());
 
         uint16 keyType = uint16(bytes2(tpmtPublic[0:2]));
@@ -209,28 +204,27 @@ library LibTpm {
         offset += 2 + apLen;
 
         if (keyType == TPMConstants.TPM_ALG_ECC) {
-            (pubkey, sigAlgo) = _parseEccPublic(tpmtPublic, offset);
+            pubkey = _parseEccPublic(tpmtPublic, offset);
         } else if (keyType == TPMConstants.TPM_ALG_RSA) {
-            (pubkey, sigAlgo) = _parseRsaPublic(tpmtPublic, offset);
+            pubkey = _parseRsaPublic(tpmtPublic, offset);
         } else {
             revert InvalidTpmtPublicType();
         }
     }
 
-    /// @dev Parses ECC TPMT_PUBLIC to extract public key and signature algorithm
+    /// @dev Parses ECC TPMT_PUBLIC to extract public key
     /// @param tpmtPublic The full TPMT_PUBLIC bytes
     /// @param offset The offset to start of TPMS_ECC_PARMS
     /// @return pubkey The EC public key in uncompressed format (0x04 || x || y)
-    /// @return sigAlgo The signature algorithm from scheme fields
     function _parseEccPublic(bytes calldata tpmtPublic, uint256 offset)
         private
         pure
-        returns (CertPubkey memory pubkey, SignatureAlgorithm memory sigAlgo)
+        returns (CertPubkey memory pubkey)
     {
         // TPMS_ECC_PARMS: symmetric(2+) + scheme(2+) + curveID(2) + kdf(2+)
         require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
 
-        // Parse symmetric
+        // Skip symmetric
         uint16 symmetricAlgo = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
         if (symmetricAlgo != TPMConstants.TPM_ALG_NULL) {
@@ -238,15 +232,13 @@ library LibTpm {
             offset += 4;
         }
 
-        // Parse scheme
+        // Skip scheme
         require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
-        sigAlgo.scheme = uint16(bytes2(tpmtPublic[offset:offset + 2]));
+        uint16 scheme = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
 
-        if (sigAlgo.scheme != TPMConstants.TPM_ALG_NULL) {
-            // Extract hashAlg
-            require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
-            sigAlgo.hashAlgo = uint16(bytes2(tpmtPublic[offset:offset + 2]));
+        if (scheme != TPMConstants.TPM_ALG_NULL) {
+            // Skip hashAlg
             offset += 2;
         }
 
@@ -285,35 +277,32 @@ library LibTpm {
         pubkey = CertPubkey({algo: TPMConstants.TPM_ALG_ECC, params: curveID, data: ecPoint});
     }
 
-    /// @dev Parses RSA TPMT_PUBLIC to extract public key and signature algorithm
+    /// @dev Parses RSA TPMT_PUBLIC to extract public key
     /// @param tpmtPublic The full TPMT_PUBLIC bytes
     /// @param offset The offset to start of TPMS_RSA_PARMS
     /// @return pubkey The RSA public key as DER-encoded RSAPublicKey
-    /// @return sigAlgo The signature algorithm from scheme fields
     function _parseRsaPublic(bytes calldata tpmtPublic, uint256 offset)
         private
         pure
-        returns (CertPubkey memory pubkey, SignatureAlgorithm memory sigAlgo)
+        returns (CertPubkey memory pubkey)
     {
         // TPMS_RSA_PARMS: symmetric(2+) + scheme(2+) + keyBits(2) + exponent(4)
         require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
 
-        // Parse symmetric
+        // Skip symmetric
         uint16 symmetricAlgo = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
         if (symmetricAlgo != TPMConstants.TPM_ALG_NULL) {
             offset += 4; // skip keyBits + mode
         }
 
-        // Parse scheme
+        // Skip scheme
         require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
-        sigAlgo.scheme = uint16(bytes2(tpmtPublic[offset:offset + 2]));
+        uint16 scheme = uint16(bytes2(tpmtPublic[offset:offset + 2]));
         offset += 2;
 
-        if (sigAlgo.scheme != TPMConstants.TPM_ALG_NULL) {
-            // Extract hashAlg
-            require(offset + 2 <= tpmtPublic.length, ParseOffsetOutOfBounds());
-            sigAlgo.hashAlgo = uint16(bytes2(tpmtPublic[offset:offset + 2]));
+        if (scheme != TPMConstants.TPM_ALG_NULL) {
+            // Skip hashAlg
             offset += 2;
         }
 

@@ -122,12 +122,11 @@ interface ITpmAttestation is ICertChainRegistry {
     /// @param akPub The trusted Attestation Key public key
     /// @param expectedExtraData Optional: Expected extraData for replay protection (empty to skip)
     /// @return certifiedPubkey The certified key extracted as CertPubkey
-    /// @return certifiedSigAlgo The signature algorithm for the certified key
     function verifyTpmKeyCertification(
         bytes calldata certifyInfo,
         bytes calldata akSignature,
         bytes calldata tpmtPublic,
         CertPubkey calldata akPub,
         bytes calldata expectedExtraData
-    ) external view returns (CertPubkey memory certifiedPubkey, SignatureAlgorithm memory certifiedSigAlgo);
+    ) external view returns (CertPubkey memory certifiedPubkey);
 }
