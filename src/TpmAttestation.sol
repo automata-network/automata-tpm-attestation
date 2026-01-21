@@ -2,7 +2,7 @@
 // Automata Contracts
 pragma solidity ^0.8.27;
 
-import {ITpmAttestation, MeasureablePcr, Pcr, ClockInfo} from "./interfaces/ITpmAttestation.sol";
+import {ITpmAttestation, MeasureablePcr, Pcr} from "./interfaces/ITpmAttestation.sol";
 import {CertPubkey, SignatureAlgorithm, LibX509} from "./lib/LibX509.sol";
 import {LibX509Verify} from "./lib/LibX509Verify.sol";
 import {LibTpm} from "./lib/LibTpm.sol";
@@ -106,22 +106,6 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
     ) external override returns (bool, string memory) {
         _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
         return (true, "");
-    }
-
-    /// @notice Extracts the extra data field from a TPM quote
-    /// @dev The extra data field contains application-specific data that was included
-    ///      when the quote was generated (e.g., a nonce or hash of external data).
-    /// @param tpmQuote The raw TPM quote data structure (TPMS_ATTEST)
-    /// @return success True if extraction succeeded
-    /// @return extraData The extracted extra data bytes
-    function extractExtraData(bytes calldata tpmQuote)
-        external
-        pure
-        override
-        returns (bool success, bytes memory extraData)
-    {
-        extraData = LibTpm.extractExtraData(tpmQuote);
-        success = true;
     }
 
     /// @notice Validates PCR measurements in a TPM quote against expected values

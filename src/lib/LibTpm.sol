@@ -5,7 +5,7 @@ pragma solidity ^0.8.15;
 import {CertPubkey, SignatureAlgorithm, LibX509} from "./LibX509.sol";
 import {LibX509Verify} from "./LibX509Verify.sol";
 import {TPMConstants} from "../types/TPMConstants.sol";
-import {ClockInfo} from "../interfaces/ITpmAttestation.sol";
+import {ClockInfo} from "../types/Types.sol";
 import {
     InvalidTpmMagic,
     InvalidCertifyAttestType,
