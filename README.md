@@ -56,7 +56,7 @@ The `TpmAttestation` contract extends `CertChainRegistry` to provide a complete 
    ├── Verify AK certificate chain against trusted CAs
    ├── Verify TPM quote signature using AK
    ├── Validate PCR measurements against expected values
-   └── Extract and use embedded user data
+   └── Verify TPM key certification (TPM2_Certify)
 ```
 
 ## Architecture

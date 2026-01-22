@@ -131,27 +131,6 @@ function verifyTpmQuoteWithTrustedAkPub(
 
 ### Data Extraction & Validation
 
-#### `extractExtraData(bytes tpmQuote)`
-
-Extracts user data embedded in the TPM quote.
-
-> [!NOTE]
-> You may also call the `checkPcrMeasurements()` method directly to get the extra data as a return value upon successful PCR check.
-
-```solidity
-function extractExtraData(bytes calldata tpmQuote)
-    external pure returns (bool success, bytes memory extraData);
-```
-
-**Example:**
-```solidity
-(bool success, bytes memory userData) = tpmAttestation.extractExtraData(tpmQuote);
-if (success) {
-    // Process extracted user data
-    address userAddress = abi.decode(userData, (address));
-}
-```
-
 #### `checkPcrMeasurements(bytes tpmQuote, MeasureablePcr[] tpmPcrs)`
 
 Validates PCR measurements against the TPM quote.
@@ -198,32 +177,32 @@ function toFinalMeasurement(MeasureablePcr[] calldata tpmPcrs)
 > [!NOTE]
 > The final measurement format of the PCR object can be used for reference as a **Golden Measurement** for CVM Workloads that are built specifically for the intended application.
 
-#### `extractClockInfo(bytes tpmQuote)`
+### TPM Key Certification
 
-Extracts clock information from a TPM quote for replay protection.
+#### `verifyTpmKeyCertification(bytes certifyInfo, bytes akSignature, bytes tpmtPublic, CertPubkey akPub, bytes expectedExtraData)`
 
-> [!NOTE]
-> This contract does NOT include built-in replay protection. Callers MUST implement their own freshness checks using ClockInfo or other mechanisms (e.g., including block number in extraData).
+Verifies a TPM2_Certify attestation proving a key is bound to the same TPM as the Attestation Key.
 
 ```solidity
-struct ClockInfo {
-    uint64 clock;        // TPM clock value in milliseconds
-    uint32 resetCount;   // TPM reset count since manufacture
-    uint32 restartCount; // Restart count since last reset
-    bool safe;           // Whether the TPM clock is in a safe state
-}
-
-function extractClockInfo(bytes calldata tpmQuote)
-    external pure returns (ClockInfo memory info);
+function verifyTpmKeyCertification(
+    bytes calldata certifyInfo,     // Raw TPMS_ATTEST bytes from TPM2_Certify
+    bytes calldata akSignature,     // TPMT_SIGNATURE bytes from TPM2_Certify
+    bytes calldata tpmtPublic,      // Marshalled TPMT_PUBLIC of the certified key
+    CertPubkey calldata akPub,      // The trusted Attestation Key public key
+    bytes calldata expectedExtraData // Optional: Expected extraData for replay protection (empty to skip)
+) external view returns (CertPubkey memory certifiedPubkey);
 ```
 
-**Replay Detection Logic:**
-To check if a new ClockInfo is fresher than a previous one:
-1. If `resetCount` > lastSeen: TPM was reset (valid even if clock is smaller)
-2. If `restartCount` > lastSeen (same resetCount): TPM was restarted (valid)
-3. If same reset/restart counts: `clock` must be strictly greater
-4. If any counter is less than lastSeen: indicates rollback (reject)
-5. If all values are equal: indicates replay (reject)
+**Example:**
+```solidity
+CertPubkey memory certifiedKey = tpmAttestation.verifyTpmKeyCertification(
+    certifyInfo,
+    akSignature,
+    tpmtPublic,
+    trustedAkPub,
+    expectedExtraData  // Pass empty bytes to skip extraData validation
+);
+```
 
 ### Certificate Management (Inherited from CertChainRegistry)
 
