@@ -20,6 +20,7 @@ import {
     TpmSignatureVerificationFailed,
     CertifiedNameMismatch,
     ExtraDataMismatch,
+    MismatchedTpmtObjAttributes,
     PcrDigestMismatch,
     InvalidPcrDigestSize,
     UnsupportedHashAlgorithm,
@@ -205,7 +206,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
                 uint256[] memory measureEventsIdx = new uint256[](eventsIdxLength);
 
                 // Process events only if there are any
-                if (eventsIdxLength > 0) {
+                if (!currentMpcr.measurePcr && eventsIdxLength > 0) {
                     uint256 allEventsLength = currentMpcr.allEvents.length;
 
                     for (uint256 j = 0; j < eventsIdxLength; j++) {
@@ -234,7 +235,8 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         bytes calldata akSignature,
         bytes calldata tpmtPublic,
         CertPubkey calldata akPub,
-        bytes calldata expectedExtraData
+        bytes calldata expectedExtraData,
+        uint32 tpmaObjectBitMask
     ) external view override returns (CertPubkey memory certifiedPubkey) {
         // Step 1: Parse and verify AK signature over certifyInfo
         (SignatureAlgorithm memory akSigAlgo, bytes memory sig) = LibTpm.parseTpmSignature(akSignature);
@@ -253,7 +255,15 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
             require(keccak256(extraData) == keccak256(expectedExtraData), ExtraDataMismatch());
         }
 
-        // Step 5: Extract and return certified public key
+        // Step 5: Validate objectAttributes if mask is non-zero
+        if (tpmaObjectBitMask != 0) {
+            uint32 attributes = LibTpm.extractKeyAttributes(tpmtPublic);
+            if ((attributes & tpmaObjectBitMask) != tpmaObjectBitMask) {
+                revert MismatchedTpmtObjAttributes(attributes, tpmaObjectBitMask);
+            }
+        }
+
+        // Step 6: Extract and return certified public key
         certifiedPubkey = LibTpm.extractCertPubkey(tpmtPublic);
     }
 

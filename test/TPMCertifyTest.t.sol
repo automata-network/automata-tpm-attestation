@@ -39,9 +39,14 @@ contract TPMCertifyTest is SetupBase {
         // Construct akPub CertPubkey struct
         CertPubkey memory akPub = _buildAkPub();
 
+        // Required attributes: fixedTPM (bit 1), fixedParent (bit 4), sensitiveDataOrigin (bit 5), sign (bit 18)
+        // Binary: 0b0100_0000_0000_0011_0010 = 0x40032
+        uint32 requiredAttributes = 0x40032;
+
         // Call verifyTpmKeyCertification
-        CertPubkey memory certifiedPubkey =
-            tpmAttestation.verifyTpmKeyCertification(certifyInfo, akSignature, tpmtPublic, akPub, expectedExtraData);
+        CertPubkey memory certifiedPubkey = tpmAttestation.verifyTpmKeyCertification(
+            certifyInfo, akSignature, tpmtPublic, akPub, expectedExtraData, requiredAttributes
+        );
 
         // Assertions - verify the certified key was extracted
         assertEq(certifiedPubkey.algo, 0x0023, "Certified key should be ECC");
@@ -56,7 +61,7 @@ contract TPMCertifyTest is SetupBase {
         badSig[10] ^= 0xff;
 
         vm.expectRevert(TpmSignatureVerificationFailed.selector);
-        tpmAttestation.verifyTpmKeyCertification(certifyInfo, badSig, tpmtPublic, _buildAkPub(), expectedExtraData);
+        tpmAttestation.verifyTpmKeyCertification(certifyInfo, badSig, tpmtPublic, _buildAkPub(), expectedExtraData, 0);
     }
 
     function test_verifyTpmKeyCertification_wrongExtraData_reverts() public {
@@ -64,7 +69,7 @@ contract TPMCertifyTest is SetupBase {
         bytes memory wrongExtra = hex"deadbeef";
 
         vm.expectRevert(ExtraDataMismatch.selector);
-        tpmAttestation.verifyTpmKeyCertification(certifyInfo, akSignature, tpmtPublic, _buildAkPub(), wrongExtra);
+        tpmAttestation.verifyTpmKeyCertification(certifyInfo, akSignature, tpmtPublic, _buildAkPub(), wrongExtra, 0);
     }
 
     function test_verifyTpmKeyCertification_tamperedCertifyInfo_reverts() public {
@@ -74,7 +79,7 @@ contract TPMCertifyTest is SetupBase {
 
         vm.expectRevert(TpmSignatureVerificationFailed.selector);
         tpmAttestation.verifyTpmKeyCertification(
-            badCertifyInfo, akSignature, tpmtPublic, _buildAkPub(), expectedExtraData
+            badCertifyInfo, akSignature, tpmtPublic, _buildAkPub(), expectedExtraData, 0
         );
     }
 
@@ -85,7 +90,7 @@ contract TPMCertifyTest is SetupBase {
 
         vm.expectRevert(CertifiedNameMismatch.selector);
         tpmAttestation.verifyTpmKeyCertification(
-            certifyInfo, akSignature, wrongPublic, _buildAkPub(), expectedExtraData
+            certifyInfo, akSignature, wrongPublic, _buildAkPub(), expectedExtraData, 0
         );
     }
 
@@ -94,8 +99,9 @@ contract TPMCertifyTest is SetupBase {
         bytes memory emptyExtra = "";
 
         // Should succeed because extraData validation is optional
-        CertPubkey memory certifiedPubkey =
-            tpmAttestation.verifyTpmKeyCertification(certifyInfo, akSignature, tpmtPublic, _buildAkPub(), emptyExtra);
+        CertPubkey memory certifiedPubkey = tpmAttestation.verifyTpmKeyCertification(
+            certifyInfo, akSignature, tpmtPublic, _buildAkPub(), emptyExtra, 0
+        );
 
         // Verify it still returns valid data
         assertEq(certifiedPubkey.algo, 0x0023, "Should still extract certified key");

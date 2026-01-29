@@ -186,6 +186,15 @@ library LibTpm {
         name = abi.encodePacked(nameAlg, hash);
     }
 
+    /// @notice Extracts the objectAttributes field from a TPMT_PUBLIC structure
+    /// @dev The objectAttributes field is at bytes [4:8] in TPMT_PUBLIC
+    /// @param tpmtPublic The marshalled TPMT_PUBLIC bytes
+    /// @return The 32-bit TPMA_OBJECT flags
+    function extractKeyAttributes(bytes calldata tpmtPublic) internal pure returns (uint32) {
+        require(tpmtPublic.length >= 8, TpmtPublicTooShort());
+        return uint32(bytes4(tpmtPublic[4:8]));
+    }
+
     /// @notice Extracts CertPubkey from TPMT_PUBLIC
     /// @dev Handles both ECC and RSA key types
     /// @param tpmtPublic The marshalled TPMT_PUBLIC bytes
