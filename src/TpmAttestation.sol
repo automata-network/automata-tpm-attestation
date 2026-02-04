@@ -2,7 +2,7 @@
 // Automata Contracts
 pragma solidity ^0.8.27;
 
-import {ITpmAttestation, MeasureablePcr, Pcr} from "./interfaces/ITpmAttestation.sol";
+import {ITpmAttestation, PcrValue} from "./interfaces/ITpmAttestation.sol";
 import {CertPubkey, SignatureAlgorithm, LibX509} from "./lib/LibX509.sol";
 import {LibX509Verify} from "./lib/LibX509Verify.sol";
 import {LibTpm} from "./lib/LibTpm.sol";
@@ -19,7 +19,6 @@ import {
     InvalidSignature,
     TpmSignatureVerificationFailed,
     CertifiedNameMismatch,
-    ExtraDataMismatch,
     MismatchedTpmtObjAttributes,
     PcrDigestMismatch,
     InvalidPcrDigestSize,
@@ -66,66 +65,67 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
 
     constructor(address _intitialOwner, address _p256) CertChainRegistry(_intitialOwner, _p256) {}
 
-    /// @notice Verifies TPM quote signature and certificate chain
-    /// @dev IMPORTANT: This function does NOT include replay protection.
-    ///       Callers MUST implement their own freshness checks, for example:
-    ///       - Include block number/hash in extraData
-    ///       - Validate extraData contains recent block reference
-    /// @param tpmQuote The TPM quote bytes
-    /// @param tpmSignature The TPM signature bytes
-    /// @param akCertchain Array of DER-encoded certificates [leaf, intermediate..., root]
-    /// @return success Whether the verification succeeded
-    /// @return akPubEncoded ABI-encoded CertPubkey of the attestation key
     function verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, bytes[] calldata akCertchain)
         external
         override
-        returns (bool, bytes memory)
+        returns (bool, bytes memory, bytes memory)
     {
         require(akCertchain.length > 0, InvalidCertChainLength());
 
         CertPubkey memory akPub = verifyCertChain(akCertchain);
         require(akPub.data.length > 0, InvalidCertificateChain());
 
-        _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
-        return (true, abi.encode(akPub));
+        bytes memory extraData = _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
+        return (true, abi.encode(akPub), extraData);
     }
 
-    /// @notice Verifies a TPM quote using a pre-trusted attestation key public key
-    /// @dev Skips certificate chain verification since the AK public key is already trusted.
-    ///      This is used when the AK public key was previously verified or is embedded in TEE report data.
-    /// @dev IMPORTANT: This function does NOT include replay protection.
-    ///       Callers MUST implement their own freshness checks.
-    /// @param tpmQuote The raw TPM quote data structure (TPMS_ATTEST)
-    /// @param tpmSignature The TPM signature over the quote (TPMT_SIGNATURE)
-    /// @param akPub The pre-trusted attestation key public key
-    /// @return success True if verification succeeded
-    /// @return errorMessage Empty string on success, error description on failure
     function verifyTpmQuoteWithTrustedAkPub(
         bytes calldata tpmQuote,
         bytes calldata tpmSignature,
         CertPubkey calldata akPub
-    ) external override returns (bool, string memory) {
-        _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
-        return (true, "");
+    ) external override returns (bool, bytes memory) {
+        bytes memory extraData = _verifyTpmQuote(tpmQuote, tpmSignature, akPub);
+        return (true, extraData);
     }
 
-    /// @notice Validates PCR measurements in a TPM quote against expected values
-    /// @dev Performs the following validations:
-    ///      1. Parses the TPM quote structure to extract PCR selection and digest
-    ///      2. Verifies the hash algorithm is SHA-256 (TPM_ALG_SHA256)
-    ///      3. Checks that provided PCR indices match the selection bitmap in the quote
-    ///      4. Computes the expected PCR digest from provided values and compares with quote
-    ///
-    ///      PCR values can be provided directly or reconstructed from event logs.
-    ///      If a PCR value is zero and events are provided, the value is calculated
-    ///      by extending the events into an initially-zero register.
-    ///
-    /// @param tpmQuote The raw TPM quote data structure (TPMS_ATTEST)
-    /// @param tpmPcrs Array of PCR measurements to validate, including indices and values
-    /// @return success True if all PCR measurements match
-    /// @return extraData The extra data field extracted from the quote
-    /// @custom:security Critical for workload integrity - ensures the TPM measured expected values
-    function checkPcrMeasurements(bytes calldata tpmQuote, MeasureablePcr[] calldata tpmPcrs)
+    function verifyTpmKeyCertification(
+        bytes calldata certifyInfo,
+        bytes calldata akSignature,
+        bytes calldata tpmtPublic,
+        CertPubkey calldata akPub,
+        uint32 tpmaObjectBitMask
+    ) external view override returns (CertPubkey memory certifiedPubkey, bytes memory extraData) {
+        // Step 1: Parse and verify AK signature over certifyInfo
+        (SignatureAlgorithm memory akSigAlgo, bytes memory sig) = LibTpm.parseTpmSignature(akSignature);
+        address verifier = akSigAlgo.scheme == TPMConstants.TPM_ALG_ECDSA ? p256 : address(0);
+        require(akPub.verifySignature(akSigAlgo, certifyInfo, sig, verifier), TpmSignatureVerificationFailed());
+
+        // Step 2: Parse certifyInfo and extract fields
+        bytes memory certifiedName;
+        (extraData, certifiedName) = LibTpm.parseCertifyInfo(certifyInfo);
+
+        // Step 3: Compare KEY_NAME
+        bytes memory expectedName = LibTpm.computeKeyName(tpmtPublic);
+        require(keccak256(certifiedName) == keccak256(expectedName), CertifiedNameMismatch());
+
+        // Step 4: Validate objectAttributes if mask is non-zero
+        if (tpmaObjectBitMask != 0) {
+            uint32 attributes = LibTpm.extractKeyAttributes(tpmtPublic);
+            if ((attributes & tpmaObjectBitMask) != tpmaObjectBitMask) {
+                revert MismatchedTpmtObjAttributes(attributes, tpmaObjectBitMask);
+            }
+        }
+
+        // Step 5: Extract and return certified public key
+        certifiedPubkey = LibTpm.extractCertPubkey(tpmtPublic);
+    }
+
+    function extractExtraData(bytes calldata tpmQuote) external pure returns (bool success, bytes memory extraData) {
+        extraData = LibTpm.extractExtraData(tpmQuote);
+        success = true;
+    }
+
+    function checkPcrMeasurements(bytes calldata tpmQuote, PcrValue[] calldata tpmPcrs)
         external
         override
         returns (bool, bytes memory extraData)
@@ -172,102 +172,13 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         return (true, extraData);
     }
 
-    /// @notice Converts MeasureablePcr array to final Pcr measurements for workload identification
-    /// @dev Filters PCR data based on measureEventsIdx to include only the events that should
-    ///      be part of the final measurement. This allows selective measurement of specific
-    ///      boot events while ignoring transient or non-deterministic values.
-    ///
-    ///      For each MeasureablePcr:
-    ///      - If measurePcr is true, the raw PCR value is included
-    ///      - measureEventsIdx specifies which events from allEvents to include
-    ///      - Events are verified to match the calculated PCR value
-    ///
-    /// @param mpcrs Array of MeasureablePcr containing raw PCR values and event logs
-    /// @return Array of Pcr structs with filtered measurements for golden measurement comparison
-    function toFinalMeasurement(MeasureablePcr[] calldata mpcrs) external pure override returns (Pcr[] memory) {
-        // Cache array length to avoid multiple storage reads
-        uint256 mpcrsLength = mpcrs.length;
-        Pcr[] memory pcrs = new Pcr[](mpcrsLength);
+    function _verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub)
+        private
+        returns (bytes memory extraData)
+    {
+        // Parse and validate attestation headers (validates TPM_ST_ATTEST_QUOTE and extracts extraData)
+        (,, extraData) = LibTpm.parseAttestHeaders(tpmQuote, TPMConstants.TPM_ST_ATTEST_QUOTE);
 
-        // Use unchecked to save gas on bounds checking where we know it's safe
-        unchecked {
-            for (uint256 i = 0; i < mpcrsLength; i++) {
-                // Cache the current MeasureablePcr to avoid multiple calldata accesses
-                MeasureablePcr calldata currentMpcr = mpcrs[i];
-
-                // Verify events before allocating memory for arrays
-                require(_verifyEvents(currentMpcr), InvalidPcrEvents());
-
-                // Cache the measureEventsIdx length
-                uint256 eventsIdxLength = currentMpcr.measureEventsIdx.length;
-
-                // Only allocate memory if there are events to process
-                bytes32[] memory measureEvents = new bytes32[](eventsIdxLength);
-                uint256[] memory measureEventsIdx = new uint256[](eventsIdxLength);
-
-                // Process events only if there are any
-                if (!currentMpcr.measurePcr && eventsIdxLength > 0) {
-                    uint256 allEventsLength = currentMpcr.allEvents.length;
-
-                    for (uint256 j = 0; j < eventsIdxLength; j++) {
-                        uint256 eventIdx = currentMpcr.measureEventsIdx[j];
-                        require(eventIdx < allEventsLength, InvalidPcrEventIndex());
-                        measureEvents[j] = currentMpcr.allEvents[eventIdx];
-                        measureEventsIdx[j] = eventIdx;
-                    }
-                }
-
-                // Create the PCR with the correct values
-                pcrs[i] = Pcr({
-                    index: currentMpcr.index,
-                    pcr: currentMpcr.measurePcr ? currentMpcr.pcr : bytes32(0),
-                    measureEvents: measureEvents,
-                    measureEventsIdx: measureEventsIdx
-                });
-            }
-        }
-
-        return pcrs;
-    }
-
-    function verifyTpmKeyCertification(
-        bytes calldata certifyInfo,
-        bytes calldata akSignature,
-        bytes calldata tpmtPublic,
-        CertPubkey calldata akPub,
-        bytes calldata expectedExtraData,
-        uint32 tpmaObjectBitMask
-    ) external view override returns (CertPubkey memory certifiedPubkey) {
-        // Step 1: Parse and verify AK signature over certifyInfo
-        (SignatureAlgorithm memory akSigAlgo, bytes memory sig) = LibTpm.parseTpmSignature(akSignature);
-        address verifier = akSigAlgo.scheme == TPMConstants.TPM_ALG_ECDSA ? p256 : address(0);
-        require(akPub.verifySignature(akSigAlgo, certifyInfo, sig, verifier), TpmSignatureVerificationFailed());
-
-        // Step 2: Parse certifyInfo and extract fields
-        (bytes memory extraData, bytes memory certifiedName) = LibTpm.parseCertifyInfo(certifyInfo);
-
-        // Step 3: Compare KEY_NAME
-        bytes memory expectedName = LibTpm.computeKeyName(tpmtPublic);
-        require(keccak256(certifiedName) == keccak256(expectedName), CertifiedNameMismatch());
-
-        // Step 4: Validate extraData if provided
-        if (expectedExtraData.length != 0) {
-            require(keccak256(extraData) == keccak256(expectedExtraData), ExtraDataMismatch());
-        }
-
-        // Step 5: Validate objectAttributes if mask is non-zero
-        if (tpmaObjectBitMask != 0) {
-            uint32 attributes = LibTpm.extractKeyAttributes(tpmtPublic);
-            if ((attributes & tpmaObjectBitMask) != tpmaObjectBitMask) {
-                revert MismatchedTpmtObjAttributes(attributes, tpmaObjectBitMask);
-            }
-        }
-
-        // Step 6: Extract and return certified public key
-        certifiedPubkey = LibTpm.extractCertPubkey(tpmtPublic);
-    }
-
-    function _verifyTpmQuote(bytes calldata tpmQuote, bytes calldata tpmSignature, CertPubkey memory akPub) private {
         // Use library function for signature parsing (fixes ECDSA length bug: 40 -> 72)
         (SignatureAlgorithm memory sigAlgo, bytes memory sig) = LibTpm.parseTpmSignature(tpmSignature);
 
@@ -282,7 +193,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         emit TpmSignatureVerified(keccak256(tpmQuote));
     }
 
-    function _compactSelections(MeasureablePcr[] calldata tpmPcrs) private pure returns (bytes4) {
+    function _compactSelections(PcrValue[] calldata tpmPcrs) private pure returns (bytes4) {
         // Use a single uint32 instead of an array to reduce memory operations
         uint32 bitmap;
         uint256 len = tpmPcrs.length;
@@ -290,7 +201,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         // Cache array length and use unchecked for loop operations to save gas
         unchecked {
             for (uint256 i = 0; i < len && i < 32; i++) {
-                uint256 idx = tpmPcrs[i].index;
+                uint256 idx = uint256(tpmPcrs[i].pcrIndex);
                 // Enforce that PCR index is within valid range for 32-bit bitmap
                 require(idx < 32, PcrIndexOutOfRange());
                 // Set bit directly in the bitmap using a single operation
@@ -305,14 +216,18 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         );
     }
 
-    function _digest(MeasureablePcr[] calldata tpmPcrs) private pure returns (bytes32) {
+    function _digest(PcrValue[] calldata tpmPcrs) private pure returns (bytes32) {
         bytes memory concatenated;
 
         for (uint256 i = 0; i < tpmPcrs.length; i++) {
-            bytes32 pcrValue = tpmPcrs[i].pcr;
+            bytes32 pcrValue = tpmPcrs[i].value;
+            bytes32 computedPcrValue = _calculatePcrFromEvents(tpmPcrs[i].eventLogHashes);
             // If a PCR value is zero, calculate it from events (if provided)
             if (pcrValue == bytes32(0)) {
-                pcrValue = _calculatePcrFromEvents(tpmPcrs[i].allEvents);
+                pcrValue = computedPcrValue;
+            } else {
+                // If a PCR value is provided, verify it matches the computed value from events
+                require(pcrValue == computedPcrValue, InvalidPcrEvents());
             }
             concatenated = abi.encodePacked(concatenated, pcrValue);
         }
@@ -326,15 +241,5 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
             pcr = sha256(abi.encodePacked(pcr, events[i]));
         }
         return pcr;
-    }
-
-    function _verifyEvents(MeasureablePcr calldata mpcr) private pure returns (bool) {
-        // If a PCR value is provided, it must match the calculated value from its events.
-        // If no PCR value is provided, this check is skipped (it's calculated in _digest).
-        if (mpcr.pcr != bytes32(0) && mpcr.allEvents.length > 0) {
-            return _calculatePcrFromEvents(mpcr.allEvents) == mpcr.pcr;
-        }
-        // If no events are provided, or no pcr is provided, there's nothing to verify here.
-        return true;
     }
 }

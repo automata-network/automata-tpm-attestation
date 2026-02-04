@@ -4,7 +4,7 @@ pragma solidity >=0.8.15;
 import "./SetupBase.sol";
 import "../src/lib/LibX509.sol";
 import {SignatureAlgorithm} from "../src/lib/LibX509.sol";
-import {TpmSignatureVerificationFailed, CertifiedNameMismatch, ExtraDataMismatch} from "../src/types/Errors.sol";
+import {TpmSignatureVerificationFailed, CertifiedNameMismatch} from "../src/types/Errors.sol";
 
 contract TPMCertifyTest is SetupBase {
     // Test data loaded from files
@@ -44,15 +44,17 @@ contract TPMCertifyTest is SetupBase {
         uint32 requiredAttributes = 0x40032;
 
         // Call verifyTpmKeyCertification
-        CertPubkey memory certifiedPubkey = tpmAttestation.verifyTpmKeyCertification(
-            certifyInfo, akSignature, tpmtPublic, akPub, expectedExtraData, requiredAttributes
-        );
+        (CertPubkey memory certifiedPubkey, bytes memory extraData) =
+            tpmAttestation.verifyTpmKeyCertification(certifyInfo, akSignature, tpmtPublic, akPub, requiredAttributes);
 
         // Assertions - verify the certified key was extracted
         assertEq(certifiedPubkey.algo, 0x0023, "Certified key should be ECC");
         assertEq(certifiedPubkey.params, 0x0003, "Certified key should be P-256");
         assertTrue(certifiedPubkey.data.length > 0, "Certified key data should not be empty");
         assertEq(certifiedPubkey.data.length, 65, "Uncompressed P-256 public key should be 65 bytes");
+
+        // Verify extraData matches expected
+        assertEq(keccak256(extraData), keccak256(expectedExtraData), "ExtraData should match expected value");
     }
 
     function test_verifyTpmKeyCertification_invalidSignature_reverts() public {
@@ -61,15 +63,16 @@ contract TPMCertifyTest is SetupBase {
         badSig[10] ^= 0xff;
 
         vm.expectRevert(TpmSignatureVerificationFailed.selector);
-        tpmAttestation.verifyTpmKeyCertification(certifyInfo, badSig, tpmtPublic, _buildAkPub(), expectedExtraData, 0);
+        tpmAttestation.verifyTpmKeyCertification(certifyInfo, badSig, tpmtPublic, _buildAkPub(), 0);
     }
 
-    function test_verifyTpmKeyCertification_wrongExtraData_reverts() public {
-        // Provide mismatched extraData
-        bytes memory wrongExtra = hex"deadbeef";
+    function test_verifyTpmKeyCertification_returnsCorrectExtraData() public view {
+        // Verify that the returned extraData matches the expected value
+        (, bytes memory extraData) =
+            tpmAttestation.verifyTpmKeyCertification(certifyInfo, akSignature, tpmtPublic, _buildAkPub(), 0);
 
-        vm.expectRevert(ExtraDataMismatch.selector);
-        tpmAttestation.verifyTpmKeyCertification(certifyInfo, akSignature, tpmtPublic, _buildAkPub(), wrongExtra, 0);
+        assertEq(keccak256(extraData), keccak256(expectedExtraData), "Returned extraData should match expected value");
+        assertTrue(extraData.length > 0, "ExtraData should not be empty");
     }
 
     function test_verifyTpmKeyCertification_tamperedCertifyInfo_reverts() public {
@@ -78,9 +81,7 @@ contract TPMCertifyTest is SetupBase {
         badCertifyInfo[50] ^= 0xff;
 
         vm.expectRevert(TpmSignatureVerificationFailed.selector);
-        tpmAttestation.verifyTpmKeyCertification(
-            badCertifyInfo, akSignature, tpmtPublic, _buildAkPub(), expectedExtraData, 0
-        );
+        tpmAttestation.verifyTpmKeyCertification(badCertifyInfo, akSignature, tpmtPublic, _buildAkPub(), 0);
     }
 
     function test_verifyTpmKeyCertification_wrongTpmtPublic_reverts() public {
@@ -89,22 +90,20 @@ contract TPMCertifyTest is SetupBase {
         wrongPublic[50] ^= 0xff; // Change a byte in the key data
 
         vm.expectRevert(CertifiedNameMismatch.selector);
-        tpmAttestation.verifyTpmKeyCertification(
-            certifyInfo, akSignature, wrongPublic, _buildAkPub(), expectedExtraData, 0
-        );
+        tpmAttestation.verifyTpmKeyCertification(certifyInfo, akSignature, wrongPublic, _buildAkPub(), 0);
     }
 
-    function test_verifyTpmKeyCertification_emptyExtraData_skipsValidation() public view {
-        // Empty extraData should skip validation (not revert)
-        bytes memory emptyExtra = "";
+    function test_verifyTpmKeyCertification_returnsExtraDataAndCertifiedKey() public view {
+        // Verify that both the certified key and extraData are returned correctly
+        (CertPubkey memory certifiedPubkey, bytes memory extraData) =
+            tpmAttestation.verifyTpmKeyCertification(certifyInfo, akSignature, tpmtPublic, _buildAkPub(), 0);
 
-        // Should succeed because extraData validation is optional
-        CertPubkey memory certifiedPubkey = tpmAttestation.verifyTpmKeyCertification(
-            certifyInfo, akSignature, tpmtPublic, _buildAkPub(), emptyExtra, 0
-        );
-
-        // Verify it still returns valid data
-        assertEq(certifiedPubkey.algo, 0x0023, "Should still extract certified key");
+        // Verify certified key is extracted correctly
+        assertEq(certifiedPubkey.algo, 0x0023, "Should extract certified key");
         assertTrue(certifiedPubkey.data.length > 0, "Certified key data should not be empty");
+
+        // Verify extraData is returned
+        assertTrue(extraData.length > 0, "ExtraData should not be empty");
+        assertEq(keccak256(extraData), keccak256(expectedExtraData), "ExtraData should match expected value");
     }
 }
