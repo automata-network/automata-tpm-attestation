@@ -28,7 +28,8 @@ import {
     InvalidPcrEventIndex,
     TpmSignatureTooShort,
     InvalidRsaSignatureSize,
-    PcrIndexOutOfRange
+    PcrIndexOutOfRange,
+    PcrNotSorted
 } from "./types/Errors.sol";
 
 /// @title TpmAttestation
@@ -220,6 +221,9 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         bytes memory concatenated;
 
         for (uint256 i = 0; i < tpmPcrs.length; i++) {
+            if (i > 0) {
+                require(tpmPcrs[i].pcrIndex > tpmPcrs[i - 1].pcrIndex, PcrNotSorted());
+            }
             bytes32 pcrValue = tpmPcrs[i].value;
             bytes32 computedPcrValue = _calculatePcrFromEvents(tpmPcrs[i].eventLogHashes);
             // If a PCR value is zero, calculate it from events (if provided)

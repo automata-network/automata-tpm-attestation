@@ -23,6 +23,7 @@ error InvalidPcrEventIndex();
 error TpmSignatureTooShort();
 error InvalidRsaSignatureSize();
 error PcrIndexOutOfRange();
+error PcrNotSorted();
 error RootCaNotAtEndOfChain();
 
 // --- TPM2_Certify Errors ---
