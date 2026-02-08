@@ -225,14 +225,15 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
                 require(tpmPcrs[i].pcrIndex > tpmPcrs[i - 1].pcrIndex, PcrNotSorted());
             }
             bytes32 pcrValue = tpmPcrs[i].value;
-            bytes32 computedPcrValue = _calculatePcrFromEvents(tpmPcrs[i].eventLogHashes);
-            // If a PCR value is zero, calculate it from events (if provided)
-            if (pcrValue == bytes32(0)) {
-                pcrValue = computedPcrValue;
-            } else {
-                // If a PCR value is provided, verify it matches the computed value from events
-                require(pcrValue == computedPcrValue, InvalidPcrEvents());
+            bytes32[] calldata events = tpmPcrs[i].eventLogHashes;
+
+            // only verify the value if event logs are provided.
+            if (events.length > 0) {
+                bytes32 computed = _calculatePcrFromEvents(events);
+                require(pcrValue == bytes32(0) || pcrValue == computed, InvalidPcrEvents());
+                pcrValue = computed;
             }
+
             concatenated = abi.encodePacked(concatenated, pcrValue);
         }
 
