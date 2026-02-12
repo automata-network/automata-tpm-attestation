@@ -35,8 +35,7 @@ The `TpmAttestation` contract extends `CertChainRegistry` to provide a complete 
 
 | Network | Contract Address |
 | --- | --- |
-| Automata Testnet | [0xd8f86325Ea717F167cabc5BF0c5f06Df2E546368](https://explorer-testnet.ata.network/address/0xd8f86325Ea717F167cabc5BF0c5f06Df2E546368) |
-| Sepolia Testnet | [0xd8f86325Ea717F167cabc5BF0c5f06Df2E546368](https://sepolia.etherscan.io/address/0xd8f86325Ea717F167cabc5BF0c5f06Df2E546368) |
+| Hoodi Testnet | [0x715e8A7B3E24C0a27dE09b6eaD7e13B2A797cf8B](https://hoodi.etherscan.io/address/0x715e8A7B3E24C0a27dE09b6eaD7e13B2A797cf8B) |
 
 ## TPM Attestation Workflow
 
@@ -56,7 +55,7 @@ The `TpmAttestation` contract extends `CertChainRegistry` to provide a complete 
    ├── Verify AK certificate chain against trusted CAs
    ├── Verify TPM quote signature using AK
    ├── Validate PCR measurements against expected values
-   └── Extract and use embedded user data
+   └── Verify TPM key certification (TPM2_Certify)
 ```
 
 ## Architecture
@@ -71,21 +70,19 @@ The `TpmAttestation` contract extends `CertChainRegistry` to provide a complete 
 ### Key Data Structures
 
 ```solidity
-// Input PCR measurements with event history
-struct MeasureablePcr {
-    uint256 index;           // PCR index
-    bytes32 pcr;            // Current PCR value
-    bytes32[] allEvents;    // Complete event history
-    uint256[] measureEventsIdx; // Indices of events to measure
-    bool measurePcr;        // Whether to include PCR value
+// PCR value with optional event replay log
+struct PcrValue {
+    uint8 pcrIndex;            // PCR index (0-23)
+    bytes32 value;             // Final PCR value (cumulative hash)
+    bytes32[] eventLogHashes;  // Event hashes extended into this PCR (optional)
 }
 
-// Final measurement format for validation
-struct Pcr {
-    uint256 index;          // PCR index
-    bytes32 pcr;           // Expected PCR value (0 if not measured)
-    bytes32[] measureEvents; // Expected events subset
-    uint256[] measureEventsIdx; // Event indices
+// Clock info from TPM attestation (for caller's replay detection logic)
+struct ClockInfo {
+    uint64 clock;          // TPM clock value in milliseconds
+    uint32 resetCount;     // TPM reset count since manufacture
+    uint32 restartCount;   // Restart count since last reset
+    bool safe;             // Whether the TPM clock is in a safe state
 }
 
 // Public key representation

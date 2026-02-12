@@ -80,7 +80,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     ///      1. Verifies certificate constraints (CA flag, key usage)
     ///      2. Verifies the certificate is self-signed (root CA)
     /// @param ca The DER-encoded X.509 root CA certificate
-    function addCA(bytes calldata ca) public override onlyOwner {
+    function addCA(bytes calldata ca) external override onlyOwner {
         bytes32 key = keccak256(ca);
         _verifyCertificateConstraints(ca, false, 0);
 
@@ -94,7 +94,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     /// @notice Removes a Certificate Authority (CA) from the registry.
     /// @param ca - The X509 Certificate Authority (CA) in DER format.
     /// @dev should implement access-control
-    function removeCA(bytes calldata ca) public onlyOwner {
+    function removeCA(bytes calldata ca) external onlyOwner {
         bytes32 key = keccak256(ca);
         require(verifiedCA[key], CertNotCa());
         delete verifiedCA[key];
@@ -104,7 +104,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     /// @notice Enable or disable strict CRL mode
     /// @param enabled True to enable strict mode, false to disable
     /// @dev In strict mode, verifyCertChain requires valid CRL for each issuer
-    function setStrictCRLMode(bool enabled) public onlyOwner {
+    function setStrictCRLMode(bool enabled) external onlyOwner {
         strictCRLMode = enabled;
         emit StrictCRLModeChanged(enabled);
     }
@@ -112,7 +112,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     /// @notice Check if a certificate is revoked
     /// @param cert The DER-encoded certificate to check
     /// @return True if the certificate is revoked
-    function isCertificateRevoked(bytes calldata cert) public view returns (bool) {
+    function isCertificateRevoked(bytes calldata cert) external view returns (bool) {
         bytes memory issuerDN = LibX509.getCertIssuerDN(cert);
         uint256 serialNumber = LibX509.getCertSerialNumber(cert);
 
@@ -126,7 +126,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     /// @dev Used for cache invalidation when intermediate CAs are compromised or retired.
     ///      Does not affect root CA trust - only clears the verification cache.
     /// @param certHashes Array of binding hashes to remove from cache
-    function removeIntermediateCerts(bytes32[] calldata certHashes) public onlyOwner {
+    function removeIntermediateCerts(bytes32[] calldata certHashes) external onlyOwner {
         for (uint256 i = 0; i < certHashes.length; i++) {
             bytes32 certHash = certHashes[i];
             if (cachedIntermediates[certHash] != bytes32(0)) {
@@ -144,7 +144,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     /// @dev 2. CRL signature against issuer's public key
     /// @dev 3. Issuer DN and AKID match
     /// @dev 4. Anti-rollback: new CRL's thisUpdate must be >= cached CRL's thisUpdate
-    function updateCRL(bytes calldata crl, bytes calldata issuerCert) public {
+    function updateCRL(bytes calldata crl, bytes calldata issuerCert) external {
         // Parse CRL
         CRLInfo memory crlInfo = LibX509.parseCRL(crl);
 

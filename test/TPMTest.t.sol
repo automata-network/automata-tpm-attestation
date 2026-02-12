@@ -32,10 +32,11 @@ contract TPMTest is SetupBase {
     function test_TpmRsa() public {
         CertPubkey memory pubkey = LibX509.newRsaPubkey(TPM_RSA_KEY_N, TPM_RSA_KEY_E);
 
-        (bool success, string memory errorMessage) =
+        (bool success, bytes memory extraData) =
             tpmAttestation.verifyTpmQuoteWithTrustedAkPub(TPM_RSA_QUOTE, TPM_RSA_SIGNATURE, pubkey);
 
-        assertTrue(success, errorMessage);
+        assertTrue(success);
+        assertTrue(extraData.length > 0);
     }
 
     function test_TpmWithCertchain() public {
@@ -50,9 +51,11 @@ contract TPMTest is SetupBase {
         certChain[0] = TPM_AK_CERT_CHAIN_0;
         certChain[1] = TPM_AK_CERT_CHAIN_1;
         certChain[2] = TPM_AK_CERT_CHAIN_2;
-        (bool success, bytes memory errorMessage) =
+        (bool success, bytes memory akPubkey, bytes memory extraData) =
             tpmAttestation.verifyTpmQuote(TPM_NIST_P256_QUOTE, TPM_NIST_P256_SIGNATURE, certChain);
 
-        assertTrue(success, string(errorMessage));
+        assertTrue(success);
+        assertTrue(akPubkey.length > 0);
+        assertTrue(extraData.length > 0);
     }
 }

@@ -7,6 +7,7 @@ error InvalidArgument();
 error ZeroAddress(string paramName);
 
 // --- TPM Attestation Errors ---
+error InvalidTpmMagic();
 error InvalidTpmQuote();
 error TpmQuoteTooShort();
 error InvalidTpmAttType();
@@ -22,7 +23,18 @@ error InvalidPcrEventIndex();
 error TpmSignatureTooShort();
 error InvalidRsaSignatureSize();
 error PcrIndexOutOfRange();
+error PcrNotSorted();
 error RootCaNotAtEndOfChain();
+
+// --- TPM2_Certify Errors ---
+error InvalidCertifyAttestType();
+error CertifiedNameMismatch();
+error ExtraDataMismatch();
+error TpmtPublicTooShort();
+error UnsupportedNameAlgorithm();
+error InvalidTpmtPublicType();
+error ParseOffsetOutOfBounds();
+error MismatchedTpmtObjAttributes(uint32 actual, uint32 expected);
 
 // --- Certificate & Crypto Errors ---
 error CertChainVerificationFailed(string reason);

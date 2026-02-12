@@ -85,14 +85,14 @@ tpmAttestation.removeCA(caCert);
 
 #### `verifyTpmQuote(bytes tpmQuote, bytes tpmSignature, bytes[] akCertchain)`
 
-Verifies a TPM quote with full certificate chain validation. Upon successful verification, this method returns the ABI encoded TPM Attestation Key.
+Verifies a TPM quote with full certificate chain validation. Upon successful verification, returns the ABI-encoded TPM Attestation Key public key and the extraData field from the quote.
 
 ```solidity
 function verifyTpmQuote(
     bytes calldata tpmQuote,      // TPM quote data
     bytes calldata tpmSignature,  // TPM signature
     bytes[] calldata akCertchain  // AK certificate chain [leaf, intermediate, root]
-) external returns (bool success, bytes memory encodedAkPub);
+) external returns (bool success, bytes memory akPubkey, bytes memory extraData);
 ```
 
 **Example:**
@@ -105,7 +105,7 @@ certChain[0] = akLeafCert;
 certChain[1] = intermediateCert;
 certChain[2] = rootCaCert;
 
-(bool success, bytes memory encodedAkPub) = tpmAttestation.verifyTpmQuote(
+(bool success, bytes memory akPubkey, bytes memory extraData) = tpmAttestation.verifyTpmQuote(
     tpmQuote,
     tpmSignature,
     certChain
@@ -113,117 +113,154 @@ certChain[2] = rootCaCert;
 
 require(success, "Failed to verify TPM Quote");
 
-// Decode the key
-CertPubkey memory ak = abi.decode(encodedAkPub, (CertPubkey));
+// Decode the Attestation Key
+CertPubkey memory ak = abi.decode(akPubkey, (CertPubkey));
+
+// extraData can be used for replay protection (e.g., compare against a nonce you provided)
 ```
 
 #### `verifyTpmQuoteWithTrustedAkPub(bytes tpmQuote, bytes tpmSignature, CertPubkey akPub)`
 
-Verifies a TPM quote using a pre-verified Attestation Key (saves gas).
+Verifies a TPM quote using a pre-verified Attestation Key (saves gas by skipping certificate chain verification). The caller is responsible for ensuring the provided `akPub` is trusted.
 
 ```solidity
 function verifyTpmQuoteWithTrustedAkPub(
     bytes calldata tpmQuote,
     bytes calldata tpmSignature,
     CertPubkey calldata akPub    // Pre-verified AK public key
-) external returns (bool success, string memory errorMessage);
+) external returns (bool success, bytes memory extraData);
 ```
 
 ### Data Extraction & Validation
 
-#### `extractExtraData(bytes tpmQuote)`
+#### `checkPcrMeasurements(bytes tpmQuote, PcrValue[] tpmPcrs)`
 
-Extracts user data embedded in the TPM quote.
-
-> [!NOTE]
-> You may also call the `checkPcrMeasurements()` method directly to get the extra data as a return value upon successful PCR check.
-
-```solidity
-function extractExtraData(bytes calldata tpmQuote)
-    external pure returns (bool success, bytes memory extraData);
-```
-
-**Example:**
-```solidity
-(bool success, bytes memory userData) = tpmAttestation.extractExtraData(tpmQuote);
-if (success) {
-    // Process extracted user data
-    address userAddress = abi.decode(userData, (address));
-}
-```
-
-#### `checkPcrMeasurements(bytes tpmQuote, MeasureablePcr[] tpmPcrs)`
-
-Validates PCR measurements against the TPM quote.
+Validates PCR measurements against the TPM quote. Parses the quote's PCR selection bitmap and digest, then verifies that the provided PCR values produce the same digest.
 
 > [!NOTE]
 > PCR Digest currently only supports SHA256 hash (`TPM_ALG_SHA256 = 0x000B`).
 
+> [!IMPORTANT]
+> The `tpmPcrs` array **must be sorted in ascending order by `pcrIndex`**. The contract will revert with `PcrNotSorted()` if this constraint is violated.
+
 ```solidity
+struct PcrValue {
+    uint8 pcrIndex;            // PCR index (0-23)
+    bytes32 value;             // Final PCR value (cumulative hash)
+    bytes32[] eventLogHashes;  // Event hashes extended into this PCR (optional)
+}
+
 function checkPcrMeasurements(
     bytes calldata tpmQuote,
-    MeasureablePcr[] calldata tpmPcrs
-) external pure returns (bool success, bytes memory returnData);
+    PcrValue[] calldata tpmPcrs
+) external returns (bool success, bytes memory extraData);
 ```
+
+If `eventLogHashes` is provided for a PCR, the contract reconstructs the PCR value by iteratively extending each event hash (starting from zero) using SHA-256:
+
+```
+pcr = sha256(pcr || event[0])
+pcr = sha256(pcr || event[1])
+...
+```
+
+If `value` is `bytes32(0)` and events are provided, the computed value is used directly. If `value` is non-zero and events are provided, the computed value must match `value` or the call reverts with `InvalidPcrEvents()`.
 
 **Example:**
 ```solidity
-MeasureablePcr[] memory expectedPcrs = new MeasureablePcr[](1);
-expectedPcrs[0] = MeasureablePcr({
-    index: 0,
-    pcr: expectedPcrValue,
-    allEvents: eventHistory,
-    measureEventsIdx: relevantEventIndices,
-    measurePcr: true
+import {PcrValue} from "@automata-network/automata-tpm-attestation/types/Types.sol";
+
+// Provide known PCR values (sorted by pcrIndex)
+PcrValue[] memory expectedPcrs = new PcrValue[](2);
+expectedPcrs[0] = PcrValue({
+    pcrIndex: 0,
+    value: expectedPcr0Value,
+    eventLogHashes: new bytes32[](0)  // No event log verification
+});
+expectedPcrs[1] = PcrValue({
+    pcrIndex: 4,
+    value: bytes32(0),                // Will be computed from events
+    eventLogHashes: pcr4Events        // Reconstruct PCR from event log
 });
 
-(bool success, bytes memory userData) = tpmAttestation.checkPcrMeasurements(
+(bool success, bytes memory extraData) = tpmAttestation.checkPcrMeasurements(
     tpmQuote,
     expectedPcrs
 );
 
 require(success, "PCR validation failed");
 
-// At this point, you might want to check whether the extracted userData matches with the intended value.
+// extraData contains the data embedded in the TPM quote (e.g., a nonce for replay protection)
 ```
 
-#### `toFinalMeasurement(MeasureablePcr[] tpmPcrs)`
+#### `extractExtraData(bytes tpmQuote)`
 
-Converts PCR measurements to final measurement format.
+Extracts the extraData field from a TPM quote without performing any signature or PCR verification. Useful for reading the embedded nonce or user data before deciding whether to perform full verification.
 
 ```solidity
-function toFinalMeasurement(MeasureablePcr[] calldata tpmPcrs)
-    external pure returns (Pcr[] memory);
+function extractExtraData(
+    bytes calldata tpmQuote
+) external pure returns (bool success, bytes memory extraData);
 ```
-> [!NOTE]
-> The final measurement format of the PCR object can be used for reference as a **Golden Measurement** for CVM Workloads that are built specifically for the intended application.
 
-#### `extractClockInfo(bytes tpmQuote)`
+### TPM Key Certification
 
-Extracts clock information from a TPM quote for replay protection.
+#### `verifyTpmKeyCertification(bytes certifyInfo, bytes akSignature, bytes tpmtPublic, CertPubkey akPub, uint32 tpmaObjectBitMask)`
 
-> [!NOTE]
-> This contract does NOT include built-in replay protection. Callers MUST implement their own freshness checks using ClockInfo or other mechanisms (e.g., including block number in extraData).
+Verifies a TPM2_Certify attestation proving a key is bound to the same TPM as the Attestation Key. Returns the certified public key and the extraData field for the caller's own replay protection logic.
+
+The function performs the following steps:
+1. Verifies the AK signature over `certifyInfo`
+2. Parses `certifyInfo` to extract the certified key name and extraData
+3. Computes the expected key name from `tpmtPublic` and verifies it matches
+4. Optionally validates TPMA_OBJECT attribute bits if `tpmaObjectBitMask` is non-zero
+5. Extracts and returns the certified public key from `tpmtPublic`
 
 ```solidity
-struct ClockInfo {
-    uint64 clock;        // TPM clock value in milliseconds
-    uint32 resetCount;   // TPM reset count since manufacture
-    uint32 restartCount; // Restart count since last reset
-    bool safe;           // Whether the TPM clock is in a safe state
-}
-
-function extractClockInfo(bytes calldata tpmQuote)
-    external pure returns (ClockInfo memory info);
+function verifyTpmKeyCertification(
+    bytes calldata certifyInfo,     // Raw TPMS_ATTEST bytes from TPM2_Certify
+    bytes calldata akSignature,     // TPMT_SIGNATURE bytes from TPM2_Certify
+    bytes calldata tpmtPublic,      // Marshalled TPMT_PUBLIC of the certified key
+    CertPubkey calldata akPub,      // The trusted Attestation Key public key
+    uint32 tpmaObjectBitMask        // Required attribute bits (pass 0 to skip validation)
+) external view returns (CertPubkey memory certifiedPubkey, bytes memory extraData);
 ```
 
-**Replay Detection Logic:**
-To check if a new ClockInfo is fresher than a previous one:
-1. If `resetCount` > lastSeen: TPM was reset (valid even if clock is smaller)
-2. If `restartCount` > lastSeen (same resetCount): TPM was restarted (valid)
-3. If same reset/restart counts: `clock` must be strictly greater
-4. If any counter is less than lastSeen: indicates rollback (reject)
-5. If all values are equal: indicates replay (reject)
+**TPMA_OBJECT Bit Reference** (TPM 2.0 Part 2, Table 31):
+
+| Bit | Name | Value | Description |
+|-----|------|-------|-------------|
+| 1 | fixedTPM | `0x00002` | Key cannot be duplicated outside the TPM |
+| 2 | stClear | `0x00004` | Cleared on TPM2_Startup(CLEAR) |
+| 4 | fixedParent | `0x00010` | Key cannot be moved to a different parent |
+| 5 | sensitiveDataOrigin | `0x00020` | TPM generated all sensitive data |
+| 6 | userWithAuth | `0x00040` | User role auth via HMAC/password |
+| 7 | adminWithPolicy | `0x00080` | Admin role requires policy session |
+| 10 | noDA | `0x00400` | Not subject to dictionary attack lockout |
+| 11 | encryptedDuplication | `0x00800` | May be duplicated with symmetric encryption |
+| 16 | restricted | `0x10000` | Usage restricted to known-format structures |
+| 17 | decrypt | `0x20000` | Private portion may decrypt |
+| 18 | sign/encrypt | `0x40000` | Private portion may sign / encrypt |
+
+Combine bit values with OR to require multiple attributes. For example, requiring `fixedTPM | fixedParent | sensitiveDataOrigin | sign/encrypt` → `0x40032`.
+
+**Example:**
+```solidity
+// Require that the certified key is TPM-bound and can sign
+uint32 requiredAttributes = 0x40032; // fixedTPM | fixedParent | sensitiveDataOrigin | sign
+
+(CertPubkey memory certifiedKey, bytes memory extraData) = tpmAttestation.verifyTpmKeyCertification(
+    certifyInfo,
+    akSignature,
+    tpmtPublic,
+    trustedAkPub,
+    requiredAttributes  // Pass 0 to skip attribute validation
+);
+
+// The caller is responsible for checking extraData for replay protection
+// e.g., compare against a nonce you provided to TPM2_Certify
+require(keccak256(extraData) == keccak256(expectedNonce), "Replay detected");
+```
 
 ### Certificate Management (Inherited from CertChainRegistry)
 
@@ -283,9 +320,10 @@ function removeIntermediateCerts(bytes32[] calldata certHashes) external;
 ### Basic Integration Example
 
 ```solidity
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.27;
 
-import {MeasureablePcr, ITpmAttestation} from "@automata-network/automata-tpm-attestation/interfaces/ITpmAttestation.sol";
+import {PcrValue} from "@automata-network/automata-tpm-attestation/types/Types.sol";
+import {ITpmAttestation} from "@automata-network/automata-tpm-attestation/interfaces/ITpmAttestation.sol";
 
 contract MyApplication {
     ITpmAttestation public immutable tpmAttestation;
@@ -298,30 +336,30 @@ contract MyApplication {
         bytes calldata tpmQuote,
         bytes calldata tpmSignature,
         bytes[] calldata akCertchain,
-        MeasureablePcr[] calldata expectedPcrs
+        PcrValue[] calldata expectedPcrs
     ) external {
         // 1. Verify TPM quote and certificate chain
-        (bool quoteValid, bytes memory encodedAkPub) = tpmAttestation.verifyTpmQuote(
+        (bool quoteValid, bytes memory akPubkey, bytes memory extraData) = tpmAttestation.verifyTpmQuote(
             tpmQuote,
             tpmSignature,
             akCertchain
         );
         require(quoteValid, "Invalid TPM Quote");
 
-        // 2. Validate PCR measurements
-        (bool pcrValid, bytes memory userData) = tpmAttestation.checkPcrMeasurements(
+        // 2. Validate PCR measurements (tpmPcrs must be sorted by pcrIndex)
+        (bool pcrValid,) = tpmAttestation.checkPcrMeasurements(
             tpmQuote,
             expectedPcrs
         );
         require(pcrValid, "Invalid PCR measurements");
 
-        // 3. Process extracted user data
-        _processUserData(userData);
+        // 3. Process the extraData from the quote (e.g., verify nonce for replay protection)
+        _processExtraData(extraData);
     }
 
-    function _processUserData(bytes memory userData) internal {
+    function _processExtraData(bytes memory extraData) internal {
         // Implement your application logic here
-        // userData contains the information embedded in the TPM quote
+        // extraData contains the data embedded in the TPM quote (e.g., a nonce)
     }
 }
 ```
@@ -366,6 +404,65 @@ contract OptimizedTpmVerifier {
         return success;
     }
 }
+```
+
+### Key Certification Integration
+
+Use `verifyTpmKeyCertification` to prove a key was generated on the same TPM as a trusted Attestation Key:
+
+```solidity
+import {CertPubkey} from "@automata-network/automata-tpm-attestation/lib/LibX509.sol";
+import {ITpmAttestation} from "@automata-network/automata-tpm-attestation/interfaces/ITpmAttestation.sol";
+
+contract KeyCertificationVerifier {
+    ITpmAttestation public immutable tpmAttestation;
+
+    constructor(address _tpmAttestation) {
+        tpmAttestation = ITpmAttestation(_tpmAttestation);
+    }
+
+    function verifyCertifiedKey(
+        bytes calldata certifyInfo,
+        bytes calldata akSignature,
+        bytes calldata tpmtPublic,
+        CertPubkey calldata trustedAkPub,
+        bytes32 expectedNonce
+    ) external view returns (CertPubkey memory) {
+        // Require fixedTPM + fixedParent + sensitiveDataOrigin + sign
+        uint32 requiredAttrs = 0x40032;
+
+        (CertPubkey memory certifiedKey, bytes memory extraData) =
+            tpmAttestation.verifyTpmKeyCertification(
+                certifyInfo,
+                akSignature,
+                tpmtPublic,
+                trustedAkPub,
+                requiredAttrs
+            );
+
+        // Verify nonce for replay protection
+        require(keccak256(extraData) == keccak256(abi.encodePacked(expectedNonce)), "Stale attestation");
+
+        return certifiedKey;
+    }
+}
+```
+
+### Replay Protection
+
+> [!IMPORTANT]
+> The `TpmAttestation` contract does **not** include built-in replay protection. All verification functions return `extraData` — the caller is responsible for implementing freshness checks.
+
+A common pattern is to provide a nonce as the `qualifyingData` parameter when generating the TPM quote or TPM2_Certify command. The TPM embeds this nonce in the attestation structure as `extraData`. On-chain, compare the returned `extraData` against the expected nonce to ensure the attestation is fresh:
+
+```solidity
+// Generate a nonce off-chain, pass it to TPM as qualifyingData
+// Then on-chain:
+(bool success, bytes memory akPubkey, bytes memory extraData) = tpmAttestation.verifyTpmQuote(
+    tpmQuote, tpmSignature, akCertchain
+);
+require(success);
+require(keccak256(extraData) == keccak256(abi.encodePacked(expectedNonce)), "Replay detected");
 ```
 
 ## Development & Testing
