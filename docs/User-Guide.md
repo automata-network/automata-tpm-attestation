@@ -303,9 +303,21 @@ This function:
 - Validates every revoked entry's serial number, revocation date, and extensions.
   Unknown critical entry extensions and indirect `certificateIssuer` entries are
   rejected
-- Supports permanent revocation entries only. The current parser rejects
-  `certificateHold`, `holdInstructionCode`, and `removeFromCRL`; temporary
-  revocation semantics are not supported yet
+- Applies this complete-direct CRL profile:
+
+  ```text
+  complete direct CRL                 accepted
+  certificateHold                    accepted while present in active snapshot
+  non-critical holdInstructionCode   accepted and ignored
+  critical holdInstructionCode       rejected
+  removeFromCRL                      rejected
+  delta CRL                          rejected
+  IDP / partitioned CRL              rejected
+  certificateIssuer / indirect CRL   rejected
+  ```
+
+  A later complete CRL omitting a held serial is the supported release
+  mechanism; there is no owner release and no delta `removeFromCRL` processing
 - In strict CRL mode, requires current CRLs for every issuing CA above a
   subordinate signer (upload the root CRL first)
 - Retains a non-decreasing `thisUpdate` check as a second anti-rollback guard

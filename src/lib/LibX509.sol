@@ -57,7 +57,6 @@ import {
     UnsupportedCriticalCertificateExtension,
     NameConstraintsNotSupported,
     IndirectCRLNotSupported,
-    TemporaryRevocationNotSupported,
     CertificateSignatureAlgorithmMismatch
 } from "../types/Errors.sol";
 
@@ -1544,8 +1543,6 @@ library LibX509 {
     bytes constant ISSUING_DISTRIBUTION_POINT_OID = hex"551D1C";
     // 2.5.29.21 - CRL entry reasonCode
     bytes constant CRL_REASON_CODE_OID = hex"551D15";
-    // 2.5.29.23 - deprecated holdInstructionCode
-    bytes constant CRL_HOLD_INSTRUCTION_CODE_OID = hex"551D17";
     // 2.5.29.24 - CRL entry invalidityDate
     bytes constant CRL_INVALIDITY_DATE_OID = hex"551D18";
     // 2.5.29.29 - CRL entry certificateIssuer (indirect CRLs)
@@ -1699,9 +1696,6 @@ library LibX509 {
             seenOids[i] = oidHash;
 
             if (oidHash == keccak256(CRL_CERTIFICATE_ISSUER_OID)) revert IndirectCRLNotSupported();
-            if (oidHash == keccak256(CRL_HOLD_INSTRUCTION_CODE_OID)) {
-                revert TemporaryRevocationNotSupported();
-            }
             if (critical) revert InvalidCRLFormat();
 
             if (oidHash == keccak256(CRL_REASON_CODE_OID)) {
@@ -1724,7 +1718,6 @@ library LibX509 {
     function _validateCRLReasonCode(bytes memory encoded) private pure {
         if (encoded.length != 3 || encoded[0] != 0x0A || encoded[1] != 0x01) revert InvalidCRLFormat();
         uint8 reason = uint8(encoded[2]);
-        if (reason == 6) revert TemporaryRevocationNotSupported();
         if (reason == 8) revert DeltaCRLNotSupported();
         if (reason == 7 || reason > 10) revert InvalidCRLFormat();
     }

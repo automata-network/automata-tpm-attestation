@@ -140,8 +140,6 @@ error DeltaCRLNotSupported();
 error PartitionedCRLNotSupported();
 /// @dev Indirect-CRL entry issuer switching is not supported by the direct-CRL model.
 error IndirectCRLNotSupported();
-/// @dev Temporary revocation cannot be represented by the append-only blacklist.
-error TemporaryRevocationNotSupported();
 
 // --- Serial Number Validation Errors ---
 /// @dev Per RFC 5280 Section 4.1.2.2:

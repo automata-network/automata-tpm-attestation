@@ -19,8 +19,8 @@ import {
     InvalidCRLFormat,
     InvalidCRLNumber,
     DeltaCRLNotSupported,
+    PartitionedCRLNotSupported,
     IndirectCRLNotSupported,
-    TemporaryRevocationNotSupported,
     InvalidTimeFormat,
     CRLRollbackAttempt,
     CRLSignNotSet,
@@ -615,6 +615,23 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         assertTrue(restored.data.length > 0, "Restored chain must verify");
     }
 
+    function test_updateCRL_certificateHoldIsRestoredByNewCompleteSnapshot() public {
+        vm.warp(1785283200);
+
+        bytes[] memory chain = _loadCertificate("snapshot_chain");
+        bytes[] memory crls = _loadCertificate("snapshot_crls");
+        bytes memory root = chain[1];
+        registry.addCA(root);
+
+        registry.updateCRL(crls[3], _singletonChain(root));
+        assertTrue(registry.isCertificateRevokedInChain(chain), "Hold CRL must revoke the leaf");
+
+        registry.updateCRL(crls[4], _singletonChain(root));
+        assertFalse(registry.isCertificateRevokedInChain(chain), "New complete CRL must release an omitted hold");
+        CertPubkey memory released = registry.verifyCertChain(chain);
+        assertTrue(released.data.length > 0, "Released chain must verify");
+    }
+
     function test_updateCRL_completeSnapshotsActivateExpectedSetsAndReuseHistory() public {
         vm.warp(1785283200);
 
@@ -910,20 +927,64 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         assertEq(crl.revokedSerials[0], 1);
     }
 
-    function test_parseCRL_entryTemporaryReasons_revert() public {
+    function test_parseCRL_certificateHold_succeeds() public view {
         bytes memory date = hex"170D3235313230343036343233365A";
-
         bytes memory hold = _entryExtension(hex"0603551D15", "", hex"0A0106");
-        vm.expectRevert(TemporaryRevocationNotSupported.selector);
-        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, hold)));
 
+        CRLInfo memory crl = this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, hold)));
+
+        assertEq(crl.revokedSerials.length, 1);
+        assertEq(crl.revokedSerials[0], 1);
+    }
+
+    function test_parseCRL_removeFromCRL_reverts() public {
+        bytes memory date = hex"170D3235313230343036343233365A";
         bytes memory removeFromCRL = _entryExtension(hex"0603551D15", "", hex"0A0108");
         vm.expectRevert(DeltaCRLNotSupported.selector);
         this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, removeFromCRL)));
+    }
 
+    function test_parseCRL_holdInstruction_nonCritical_succeeds() public view {
+        bytes memory date = hex"170D3235313230343036343233365A";
         bytes memory holdInstruction = _entryExtension(hex"0603551D17", "", hex"06012A");
-        vm.expectRevert(TemporaryRevocationNotSupported.selector);
+
+        CRLInfo memory crl =
+            this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, holdInstruction)));
+
+        assertEq(crl.revokedSerials.length, 1);
+        assertEq(crl.revokedSerials[0], 1);
+    }
+
+    function test_parseCRL_holdInstruction_critical_reverts() public {
+        bytes memory date = hex"170D3235313230343036343233365A";
+        bytes memory holdInstruction = _entryExtension(hex"0603551D17", hex"0101FF", hex"06012A");
+
+        vm.expectRevert(InvalidCRLFormat.selector);
         this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, holdInstruction)));
+    }
+
+    function test_parseCRL_deltaExtensions_revert() public {
+        bytes memory number = _crlNumberExtension(hex"020101", "");
+
+        vm.expectRevert(DeltaCRLNotSupported.selector);
+        this._parseCRLHelper(_syntheticCRL(abi.encodePacked(number, _entryExtension(hex"0603551D1B", "", hex"020101"))));
+
+        vm.expectRevert(DeltaCRLNotSupported.selector);
+        this._parseCRLHelper(
+            _syntheticCRL(abi.encodePacked(number, _entryExtension(hex"0603551D1B", hex"0101FF", hex"020101")))
+        );
+    }
+
+    function test_parseCRL_issuingDistributionPointExtensions_revert() public {
+        bytes memory number = _crlNumberExtension(hex"020101", "");
+
+        vm.expectRevert(PartitionedCRLNotSupported.selector);
+        this._parseCRLHelper(_syntheticCRL(abi.encodePacked(number, _entryExtension(hex"0603551D1C", "", hex"3000"))));
+
+        vm.expectRevert(PartitionedCRLNotSupported.selector);
+        this._parseCRLHelper(
+            _syntheticCRL(abi.encodePacked(number, _entryExtension(hex"0603551D1C", hex"0101FF", hex"3000")))
+        );
     }
 
     function test_parseCRL_certificateIssuerEntryExtension_reverts() public {
