@@ -294,12 +294,8 @@ This function:
 - Stores the CRL and revocations in a namespace bound to the signer's subject
   DN and public key. The same CA identity therefore shares revocation state
   across cross-certification and root-certificate renewal paths
-- In strict CRL mode, requires current CRLs for every issuing CA above a
-  subordinate signer (upload the root CRL first)
-- Accepts only direct, complete CRLs; delta, partitioned, and indirect CRLs are
-  rejected
 - Requires one unique, non-critical CRL Number extension and rejects malformed,
-  missing, or repeated numbers
+  missing, repeated, or non-increasing numbers
 - Requires a fully bounded DER `CertificateList`: the outer sequence contains
   exactly the TBS list, signature algorithm, and signature; the inner and outer
   `AlgorithmIdentifier` values match exactly; all CRL times use strict RFC 5280
@@ -310,7 +306,9 @@ This function:
 - Supports permanent revocation entries only. `certificateHold`,
   `holdInstructionCode`, and `removeFromCRL` are rejected because the on-chain
   blacklist is append-only and cannot safely represent temporary revocation
-- Performs anti-rollback checks
+- In strict CRL mode, requires current CRLs for every issuing CA above a
+  subordinate signer (upload the root CRL first)
+- Retains a non-decreasing `thisUpdate` check as a second anti-rollback guard
 - Syncs revoked certificates to the blacklist
 
 Any address may call this function and relay a CRL. Authorization comes from
@@ -318,6 +316,12 @@ the validated signer chain and CRL signature, not from `msg.sender`.
 
 ```solidity
 function updateCRL(bytes calldata crl, bytes[] calldata signerChain) external;
+```
+
+The latest accepted number is available under the same issuer-identity key:
+
+```solidity
+uint256 number = tpmAttestation.latestCRLNumber(scope);
 ```
 
 **Examples:**
@@ -340,9 +344,9 @@ tpmAttestation.updateCRL(intermediateCrl, intermediateSignerChain);
 Check whether a target certificate is revoked using its authenticated issuer
 and trusted-root context. The chain order is
 `[target, issuer, ..., trusted root]`; a trusted root may be queried as a
-one-element chain. The path is validated before issuer revocation state is
-queried, so a leaf without AKID still resolves through its actual issuer
-certificate.
+one-element chain.
+The path is validated before issuer revocation state is queried, so a
+leaf without AKID still resolves through its actual issuer certificate.
 
 ```solidity
 function isCertificateRevokedInChain(bytes[] calldata certChain) external view returns (bool);
@@ -358,13 +362,14 @@ bytes32 scope = tpmAttestation.computeRevocationScope(
 ```
 
 The root-hash argument is retained for ABI compatibility but is not part of the
-scope. Trust in the supplied path is still verified separately; keeping CRL
+scope. Trust in the supplied path is still verified separately; keeping the CRL
 state issuer-scoped prevents cross-certification or root-renewal paths from
 bypassing an already known revocation. RSA issuer identity hashes canonical
 mathematical public-key encoding, while exact subject-DN DER remains part of the
 scope; EC public-key bytes are hashed unchanged.
 
-The scope format is not compatible with the previous global `DN + AKID` key.
+The scope format is not compatible with the previous root-scoped or global
+`DN + AKID` keys.
 After deploying this version, add the trusted roots again and resubmit current
 CRLs in root-to-intermediate order before enabling strict CRL mode.
 

@@ -66,8 +66,12 @@ interface ICertChainRegistry {
     ///      non-root certificate signature and every certificate's validity and CA constraints
     ///      are checked. The final root must be registered in verifiedCA. A trusted root signer
     ///      uses a one-element path; an intermediate signer must include its complete path.
+    ///      CRLNumber is required and must strictly increase for the authenticated issuer scope.
     ///      In strict CRL mode, current CRLs must already exist for the signer's issuing CAs.
     function updateCRL(bytes calldata crl, bytes[] calldata signerChain) external;
+
+    /// @notice Latest accepted CRLNumber for an authenticated issuer identity
+    function latestCRLNumber(bytes32 revocationScope) external view returns (uint256);
 
     function verifyCertSignature(bytes calldata cert, CertPubkey memory issuer) external view returns (bool);
 

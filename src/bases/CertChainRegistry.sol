@@ -71,11 +71,14 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     ///      Revoked certificates fail verification even if otherwise valid
     mapping(bytes32 revocationScope => mapping(uint256 serialNumber => bool isRevoked)) public revokedCertificates;
 
-    // CRL cache: authenticated issuer identity => CRLData
+    // CRL cache: authenticated revocation scope => CRLData
     mapping(bytes32 revocationScope => CRLData crlData) public crlCache;
 
     // Strict mode: requires valid CRL for certificate chain verification
     bool public strictCRLMode;
+
+    // Latest accepted CRLNumber for each authenticated issuer identity
+    mapping(bytes32 revocationScope => uint256 crlNumber) public latestCRLNumber;
 
     constructor(address _intialOwner, address _p256) Ownable(_intialOwner) {
         if (_p256 == address(0)) revert ZeroAddress("p256");
@@ -178,7 +181,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     /// @dev 3. Every certificate is valid/authorized as a CA, and every non-root is signed by its parent
     /// @dev 4. The direct signer has the cRLSign key usage
     /// @dev 5. CRL signature, issuer DN, and AKID match the direct signer
-    /// @dev 6. Anti-rollback: new CRL's thisUpdate must be >= cached CRL's thisUpdate
+    /// @dev 6. Anti-rollback: CRLNumber must strictly increase and thisUpdate must not decrease
     /// @dev In strict CRL mode, the signer path must also have current issuer CRLs.
     function updateCRL(bytes calldata crl, bytes[] calldata signerChain) public {
         uint256 signerChainLength = signerChain.length;
@@ -245,8 +248,10 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
 
         // Anti-rollback check
         CRLData storage cached = crlCache[revocationScope];
-        if (cached.thisUpdate > 0 && crlInfo.thisUpdate < cached.thisUpdate) {
-            revert CRLRollbackAttempt();
+        if (cached.crlHash != bytes32(0)) {
+            if (crlInfo.crlNumber <= latestCRLNumber[revocationScope] || crlInfo.thisUpdate < cached.thisUpdate) {
+                revert CRLRollbackAttempt();
+            }
         }
 
         // Sync revoked certificates to blacklist
@@ -265,6 +270,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         cached.crlHash = crlHash;
         cached.thisUpdate = crlInfo.thisUpdate;
         cached.nextUpdate = crlInfo.nextUpdate;
+        latestCRLNumber[revocationScope] = crlInfo.crlNumber;
 
         emit CRLUpdated(
             revocationScope, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
@@ -427,7 +433,6 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         returns (CertPubkey[] memory)
     {
         CertPubkey[] memory issuers = new CertPubkey[](certs.length);
-
         // Get all issuers
         for (uint256 i = 0; i < certs.length; i++) {
             issuers[i] = LibX509.getPubkey(certs[i]);

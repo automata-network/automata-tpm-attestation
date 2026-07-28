@@ -27,7 +27,6 @@ import {
     CRLSignerNotTrusted,
     CRLRequiredInStrictMode,
     CRLExpiredInStrictMode,
-    UnsupportedCriticalCertificateExtension,
     Asn1InvalidLengthBytes,
     InvalidCertChainLength,
     InvalidCertificateChain,
@@ -35,6 +34,7 @@ import {
     CertChainAKIDMismatch,
     InvalidSignature,
     PathLenConstraintViolated,
+    UnsupportedCriticalCertificateExtension,
     ZeroAddress
 } from "src/types/Errors.sol";
 
@@ -551,6 +551,31 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
     }
 
     /// @notice Test updateCRL succeeds with valid CRL
+    function test_updateCRL_succeeds() public {
+        // Warp to a time within CRL validity (Nov 23 2025 - Nov 21 2035)
+        vm.warp(1764979200); // Dec 6 2025 00:00:00 UTC
+
+        bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
+        require(certs.length == 2, "Need 2 certs");
+
+        bytes memory caCert = certs[1]; // Root CA
+        registry.addCA(caCert);
+
+        // Update CRL
+        bytes memory crlBytes = _loadEmptyCRL();
+        registry.updateCRL(crlBytes, _singletonChain(caCert));
+
+        // Verify CRL was cached
+        CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
+        bytes32 revocationScope = registry.computeRevocationScope(keccak256(caCert), caCert);
+
+        (bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate) = registry.crlCache(revocationScope);
+        assertEq(crlHash, keccak256(crlBytes), "CRL hash should match");
+        assertEq(thisUpdate, crlInfo.thisUpdate, "thisUpdate should match");
+        assertEq(nextUpdate, crlInfo.nextUpdate, "nextUpdate should match");
+        assertEq(registry.latestCRLNumber(revocationScope), 5, "Latest CRL number should be cached");
+    }
+
     function test_parseCRL_missingNumber_reverts() public {
         bytes memory crlWithoutNumber = _withoutCRLNumber(_loadEmptyCRL());
 
@@ -832,29 +857,29 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         this._parseCRLHelper(_syntheticCRL(hex"300A06032A0304040100"));
     }
 
-    /// @notice Test updateCRL succeeds with valid CRL
-    function test_updateCRL_succeeds() public {
-        // Warp to a time within CRL validity (Nov 23 2025 - Nov 21 2035)
-        vm.warp(1764979200); // Dec 6 2025 00:00:00 UTC
+    function test_updateCRL_missingNumber_reverts() public {
+        vm.warp(1764979200);
 
         bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
-        require(certs.length == 2, "Need 2 certs");
-
-        bytes memory caCert = certs[1]; // Root CA
+        bytes memory caCert = certs[1];
         registry.addCA(caCert);
 
-        // Update CRL
-        bytes memory crlBytes = _loadEmptyCRL();
-        registry.updateCRL(crlBytes, _singletonChain(caCert));
+        vm.expectRevert(CRLMissingNumber.selector);
+        registry.updateCRL(_withoutCRLNumber(_loadEmptyCRL()), _singletonChain(caCert));
+    }
 
-        // Verify CRL was cached
-        CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
-        bytes32 revocationScope = registry.computeRevocationScope(keccak256(caCert), caCert);
+    function test_updateCRL_sameNumber_reverts() public {
+        vm.warp(1764979200);
 
-        (bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate) = registry.crlCache(revocationScope);
-        assertEq(crlHash, keccak256(crlBytes), "CRL hash should match");
-        assertEq(thisUpdate, crlInfo.thisUpdate, "thisUpdate should match");
-        assertEq(nextUpdate, crlInfo.nextUpdate, "nextUpdate should match");
+        bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
+        bytes memory caCert = certs[1];
+        registry.addCA(caCert);
+
+        bytes memory crl = _loadEmptyCRL();
+        registry.updateCRL(crl, _singletonChain(caCert));
+
+        vm.expectRevert(CRLRollbackAttempt.selector);
+        registry.updateCRL(crl, _singletonChain(caCert));
     }
 
     /// @notice An otherwise valid CRL must not authorize its own untrusted signer certificate
@@ -922,7 +947,8 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes[] memory certs = _loadCertificate("gcp_tdx_tpm_certs");
         require(certs.length == 3, "Need leaf, intermediate and root");
 
-        bytes32 revocationScope = registry.computeRevocationScope(keccak256(certs[2]), certs[2]);
+        bytes32 rootHash = keccak256(certs[2]);
+        bytes32 revocationScope = registry.computeRevocationScope(rootHash, certs[2]);
         uint256 signerSerial = LibX509.getCertSerialNumber(certs[1]);
         (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(certs[1]);
         assertTrue(keyUsageExists && (keyUsage & 0x0200) != 0, "Signer fixture must carry cRLSign");
@@ -1212,6 +1238,43 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         registry.updateCRL(emptyCrl, _singletonChain(caCert));
     }
 
+    function test_updateCRL_higherNumberOlderThisUpdate_reverts() public {
+        vm.warp(1785628800); // Aug 2 2026, after both CRLs and the CA become valid
+
+        bytes[] memory certs = _loadCertificate("rollback_time_ca");
+        require(certs.length == 1, "Need rollback-time CA");
+        bytes memory caCert = certs[0];
+        registry.addCA(caCert);
+
+        bytes[] memory crls = _loadCertificate("rollback_time_crls");
+        require(crls.length == 2, "Need baseline and candidate CRLs");
+        CRLInfo memory baseline = this._parseCRLHelper(crls[0]);
+        CRLInfo memory candidate = this._parseCRLHelper(crls[1]);
+
+        assertGt(candidate.crlNumber, baseline.crlNumber, "Candidate number must advance");
+        assertLt(candidate.thisUpdate, baseline.thisUpdate, "Candidate thisUpdate must roll back");
+        assertLe(baseline.thisUpdate, block.timestamp, "Baseline must be active");
+        assertGt(baseline.nextUpdate, block.timestamp, "Baseline must not be expired");
+        assertLe(candidate.thisUpdate, block.timestamp, "Candidate must be active");
+        assertGt(candidate.nextUpdate, block.timestamp, "Candidate must not be expired");
+
+        registry.updateCRL(crls[0], _singletonChain(caCert));
+
+        bytes32 scope = registry.computeRevocationScope(keccak256(caCert), caCert);
+        (bytes32 cachedHash, uint256 cachedThisUpdate, uint256 cachedNextUpdate) = registry.crlCache(scope);
+        uint256 cachedNumber = registry.latestCRLNumber(scope);
+
+        vm.expectRevert(CRLRollbackAttempt.selector);
+        registry.updateCRL(crls[1], _singletonChain(caCert));
+
+        (bytes32 finalHash, uint256 finalThisUpdate, uint256 finalNextUpdate) = registry.crlCache(scope);
+        assertEq(finalHash, cachedHash, "Rejected CRL must not change cached hash");
+        assertEq(finalThisUpdate, cachedThisUpdate, "Rejected CRL must not change thisUpdate");
+        assertEq(finalNextUpdate, cachedNextUpdate, "Rejected CRL must not change nextUpdate");
+        assertEq(registry.latestCRLNumber(scope), cachedNumber, "Rejected CRL must not change latest number");
+        assertEq(cachedNumber, 10, "Baseline CRL number must remain current");
+    }
+
     /// @notice Test updateCRL emits CRLUpdated event
     function test_updateCRL_emitsEvent() public {
         // Warp to a time within CRL validity (Nov 23 2025 - Nov 21 2035)
@@ -1265,6 +1328,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         assertEq(crlHash, keccak256(revokedCrl), "CRL hash should be updated");
         assertEq(thisUpdate, newCrlInfo.thisUpdate, "thisUpdate should be updated");
         assertTrue(thisUpdate > oldCrlInfo.thisUpdate, "New thisUpdate should be later");
+        assertEq(registry.latestCRLNumber(revocationScope), 6, "Latest CRL number should advance");
     }
 
     /// @notice Test parsing real GCP Root CA CRL
@@ -1277,6 +1341,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // Verify issuer DN
         assertTrue(crlInfo.issuerDN.length > 0, "Issuer DN should be present");
+        assertEq(crlInfo.crlNumber, 1234, "CRL number should be parsed");
 
         // Verify timestamps
         assertEq(crlInfo.thisUpdate, 1763859875, "thisUpdate should match: Nov 23, 2025 01:04:35 GMT");
@@ -1358,7 +1423,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
     }
 
     function test_updateCRL_akidlessLeaf_isRevokedByIssuerPathScope() public {
-        vm.warp(1785196800);
+        vm.warp(1785196800); // Jul 28 2026, within the certificate and CRL validity windows
 
         bytes[] memory chain = _loadCertificate("akidless_ec_chain");
         require(chain.length == 2, "Need leaf and root");
@@ -1384,7 +1449,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         uint256 leafSerial = LibX509.getCertSerialNumber(chain[0]);
         assertTrue(
             registry.revokedCertificates(revocationScope, leafSerial),
-            "Revocation must be stored under the authenticated issuer identity"
+            "Revocation must be stored under the authenticated issuer path"
         );
 
         vm.expectRevert(CertificateAlreadyRevoked.selector);
@@ -1400,6 +1465,9 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes32 otherRootHash = keccak256("different trusted root");
         bytes32 scope = registry.computeRevocationScope(rootHash, issuerCert);
 
+        // Revocation identity deliberately has no root-hash input. A CRL signed by
+        // this CA must remain effective when the same key is cross-certified or its
+        // root certificate is renewed under another trusted path.
         assertEq(
             scope,
             registry.computeRevocationScope(otherRootHash, issuerCert),
@@ -1476,11 +1544,14 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
     }
 
     function test_updateCRL_sameDNSKIDDifferentIssuerKeys_areIsolated() public {
-        vm.warp(1785196800);
+        vm.warp(1785196800); // Jul 28 2026, within all fixture validity windows
 
         bytes[] memory chainA = _loadCertificate("collision_chain_a");
         bytes[] memory chainB = _loadCertificate("collision_chain_b");
         require(chainA.length == 3 && chainB.length == 3, "Need two three-level chains");
+        bytes32 scopeA = registry.computeRevocationScope(keccak256(chainA[1]), chainA[1]);
+        bytes32 scopeB = registry.computeRevocationScope(keccak256(chainB[1]), chainB[1]);
+        assertNotEq(scopeA, scopeB, "Different issuer keys must have different revocation scopes");
 
         assertEq(
             keccak256(LibX509.getCertSubjectDN(chainA[1])),
@@ -1508,8 +1579,11 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes[] memory crls = _loadCertificate("collision_crl_a");
         registry.updateCRL(crls[0], signerChainA);
 
-        assertTrue(registry.isCertificateRevokedInChain(chainA), "Issuer A CRL must revoke chain A leaf");
-        assertFalse(registry.isCertificateRevokedInChain(chainB), "Issuer A CRL must not contaminate issuer B");
+        assertEq(registry.latestCRLNumber(scopeA), 1, "Issuer A must track its CRL number");
+        assertEq(registry.latestCRLNumber(scopeB), 0, "Issuer B must retain independent CRL state");
+
+        assertTrue(registry.isCertificateRevokedInChain(chainA), "Root A CRL must revoke chain A leaf");
+        assertFalse(registry.isCertificateRevokedInChain(chainB), "Root A CRL must not contaminate root B");
 
         vm.expectRevert(CertificateAlreadyRevoked.selector);
         registry.verifyCertChain(chainA);
@@ -1517,7 +1591,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
     }
 
     function test_updateCRL_crossCertifiedIssuerSharesRevocationAcrossRoots() public {
-        vm.warp(1785196800);
+        vm.warp(1785196800); // Jul 28 2026, within all fixture validity windows
 
         bytes[] memory chainA = _loadCertificate("cross_cert_chain_a");
         bytes[] memory chainB = _loadCertificate("cross_cert_chain_b");
@@ -1551,9 +1625,16 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes32 scopeA = registry.computeRevocationScope(keccak256(chainA[2]), chainA[1]);
         bytes32 scopeB = registry.computeRevocationScope(keccak256(chainB[2]), chainB[1]);
         assertEq(scopeA, scopeB, "Cross-certified issuer must resolve to one revocation scope");
+        assertEq(registry.latestCRLNumber(scopeA), 1, "Both paths must share CRL anti-rollback state");
 
         vm.expectRevert(CertificateAlreadyRevoked.selector);
         registry.verifyCertChain(chainB);
+
+        bytes[] memory signerChainB = new bytes[](2);
+        signerChainB[0] = chainB[1];
+        signerChainB[1] = chainB[2];
+        vm.expectRevert(CRLRollbackAttempt.selector);
+        registry.updateCRL(crls[0], signerChainB);
     }
 
     function test_isCertificateRevokedInChain_trustedRootTarget_returnsFalse() public {
