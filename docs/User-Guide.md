@@ -30,7 +30,21 @@ remappings = [
 ]
 ```
 
-### 3. P256 Configuration
+### 3. LibX509 Linking
+
+`LibX509` exposes certificate-validation and CRL-parsing helpers as externally
+linked library functions so the `TpmAttestation` runtime stays below the
+EIP-170 contract-size limit. These include
+`validateCertificateExtensions` and `parseCRL`. The repository's Foundry tests
+and deployment script deploy and link the library automatically. Tooling that
+consumes precompiled artifacts directly must deploy `LibX509` first and supply
+its address when linking `TpmAttestation` (for Forge, use
+`--libraries src/lib/LibX509.sol:LibX509:<address>`).
+
+The linked address is embedded in the implementation bytecode, so changing it
+also changes the initcode hash and any CREATE2-derived deployment address.
+
+### 4. P256 Configuration
 
 The contract requires P256 elliptic curve support for ECDSA verification:
 
@@ -255,6 +269,20 @@ Update the Certificate Revocation List for a specific issuer. This function:
 - Verifies CRL validity period
 - Verifies CRL signature against issuer's public key
 - Validates issuer DN and AKID match
+- Accepts only direct, complete CRLs; delta, partitioned, and indirect CRLs are
+  rejected
+- Requires one unique, non-critical CRL Number extension and rejects malformed,
+  missing, or repeated numbers
+- Requires a fully bounded DER `CertificateList`: the outer sequence contains
+  exactly the TBS list, signature algorithm, and signature; the inner and outer
+  `AlgorithmIdentifier` values match exactly; all CRL times use strict RFC 5280
+  UTC encoding and real calendar dates
+- Validates every revoked entry's serial number, revocation date, and extensions.
+  Unknown critical entry extensions and indirect `certificateIssuer` entries are
+  rejected
+- Supports permanent revocation entries only. `certificateHold`,
+  `holdInstructionCode`, and `removeFromCRL` are rejected because the on-chain
+  blacklist is append-only and cannot safely represent temporary revocation
 - Performs anti-rollback checks
 - Syncs revoked certificates to the blacklist
 

@@ -119,6 +119,10 @@ error CRLNotYetValid();
 error CRLSignatureVerificationFailed();
 error CRLIssuerMismatch();
 error CRLRollbackAttempt();
+/// @dev RFC 5280 Section 5.2.3 requires every conforming CRL to include CRLNumber
+error CRLMissingNumber();
+/// @dev CRLNumber must be unique, non-critical, non-negative, and valid DER
+error InvalidCRLNumber();
 error InvalidCRLFormat();
 error CRLRequiredInStrictMode();
 error CRLExpiredInStrictMode();
@@ -131,6 +135,10 @@ error DeltaCRLNotSupported();
 /// @dev Partitioned CRLs with Issuing Distribution Point (RFC 5280 Section 5.2.5) are not supported
 /// Only complete CRLs covering all certificate types are accepted
 error PartitionedCRLNotSupported();
+/// @dev Indirect-CRL entry issuer switching is not supported by the direct-CRL model.
+error IndirectCRLNotSupported();
+/// @dev Temporary revocation cannot be represented by the append-only blacklist.
+error TemporaryRevocationNotSupported();
 
 // --- Serial Number Validation Errors ---
 /// @dev Per RFC 5280 Section 4.1.2.2:

@@ -49,10 +49,15 @@ import {
     InvalidSerialNumber,
     DeltaCRLNotSupported,
     PartitionedCRLNotSupported,
+    CRLMissingNumber,
+    InvalidCRLNumber,
+    InvalidCRLFormat,
     InvalidCertificateExtensions,
     DuplicateCertificateExtension,
     UnsupportedCriticalCertificateExtension,
     NameConstraintsNotSupported,
+    IndirectCRLNotSupported,
+    TemporaryRevocationNotSupported,
     CertificateSignatureAlgorithmMismatch
 } from "../types/Errors.sol";
 
@@ -88,6 +93,7 @@ struct SignatureAlgorithm {
 struct CRLInfo {
     bytes issuerDN;
     bytes authorityKeyId;
+    uint256 crlNumber;
     uint256 thisUpdate;
     uint256 nextUpdate;
     uint256[] revokedSerials;
@@ -1520,14 +1526,25 @@ library LibX509 {
 
     // 2.5.29.35 - Authority Key Identifier OID (for CRL)
     bytes constant CRL_AUTHORITY_KEY_IDENTIFIER_OID = hex"551D23";
+    // 2.5.29.20 - CRL Number OID (RFC 5280 Section 5.2.3)
+    bytes constant CRL_NUMBER_OID = hex"551D14";
     // 2.5.29.27 - Delta CRL Indicator OID (RFC 5280 Section 5.2.4)
     bytes constant DELTA_CRL_INDICATOR_OID = hex"551D1B";
     // 2.5.29.28 - Issuing Distribution Point OID (RFC 5280 Section 5.2.5)
     bytes constant ISSUING_DISTRIBUTION_POINT_OID = hex"551D1C";
+    // 2.5.29.21 - CRL entry reasonCode
+    bytes constant CRL_REASON_CODE_OID = hex"551D15";
+    // 2.5.29.23 - deprecated holdInstructionCode
+    bytes constant CRL_HOLD_INSTRUCTION_CODE_OID = hex"551D17";
+    // 2.5.29.24 - CRL entry invalidityDate
+    bytes constant CRL_INVALIDITY_DATE_OID = hex"551D18";
+    // 2.5.29.29 - CRL entry certificateIssuer (indirect CRLs)
+    bytes constant CRL_CERTIFICATE_ISSUER_OID = hex"551D1D";
 
     /// @notice Parse a DER-encoded X.509 CRL
     /// @param der The DER-encoded CRL bytes
     /// @return crl The parsed CRL information
+    /// @dev Externally linked to keep consuming contracts below the EIP-170 runtime-size limit.
     /// @dev TBSCertList structure per RFC 5280:
     ///      TBSCertList ::= SEQUENCE {
     ///          version              Version OPTIONAL,  -- INTEGER, v2(1) if present
@@ -1538,66 +1555,66 @@ library LibX509 {
     ///          revokedCertificates  SEQUENCE OF SEQUENCE {...} OPTIONAL,
     ///          crlExtensions        [0] EXPLICIT Extensions OPTIONAL
     ///      }
-    function parseCRL(bytes calldata der) internal pure returns (CRLInfo memory crl) {
+    function parseCRL(bytes calldata der) external pure returns (CRLInfo memory crl) {
+        bytes memory encoded = der;
+        return _parseCRL(encoded);
+    }
+
+    function _parseCRL(bytes memory der) private pure returns (CRLInfo memory crl) {
+        if (der.length < 2) revert InvalidCRLFormat();
         uint256 root = der.root();
-        uint256 tbsParentPtr = der.firstChildOf(root);
-
-        // Extract TBS (To-Be-Signed) portion
-        crl.tbs = der.allBytesAt(tbsParentPtr);
-
-        uint256 tbsPtr = der.firstChildOf(tbsParentPtr);
-
-        uint256 tag = uint8(der[tbsPtr.ixs()]);
-        if (tag == 0x02) {
-            tbsPtr = der.nextSiblingOf(tbsPtr);
+        if (root.ixs() != 0 || root.ixl() + 1 != der.length || uint8(der[root.ixs()]) != 0x30) {
+            revert InvalidCRLFormat();
         }
 
-        // Skip signature algorithm
-        tbsPtr = der.nextSiblingOf(tbsPtr);
+        // CertificateList must contain exactly tbsCertList, signatureAlgorithm,
+        // and signatureValue, all wholly contained by the outer SEQUENCE.
+        uint256 tbs = der.firstChildOf(root);
+        _requireCRLNode(der, root, tbs, 0x30);
+        uint256 outerAlgorithm = _nextCRLNode(der, root, tbs);
+        _requireCRLNode(der, root, outerAlgorithm, 0x30);
+        uint256 signaturePtr = _nextCRLNode(der, root, outerAlgorithm);
+        _requireCRLNode(der, root, signaturePtr, 0x03);
+        if (signaturePtr.ixl() != root.ixl()) revert InvalidCRLFormat();
 
-        // Extract issuer DN
-        crl.issuerDN = der.allBytesAt(tbsPtr);
+        crl.tbs = der.allBytesAt(tbs);
+        uint256 field = der.firstChildOf(tbs);
 
-        // Extract thisUpdate and nextUpdate
-        tbsPtr = der.nextSiblingOf(tbsPtr);
-        (crl.thisUpdate, crl.nextUpdate) = _getCRLValidity(der, tbsPtr);
+        // CRL extensions are required by this profile, so TBSCertList must be v2(1).
+        _requireCRLNode(der, tbs, field, 0x02);
+        if (field.ixf() != field.ixl() || der[field.ixf()] != 0x01) revert InvalidCRLFormat();
 
-        // Move to next field (either revoked certs or extensions)
-        tbsPtr = der.nextSiblingOf(tbsPtr);
-        tbsPtr = der.nextSiblingOf(tbsPtr);
-
-        // Check if revoked certificates list exists (tag 0x30 = SEQUENCE)
-        if (tbsPtr != 0 && bytes1(der[tbsPtr.ixs()]) == 0x30) {
-            crl.revokedSerials = _getCRLRevokedSerials(der, tbsPtr);
-            tbsPtr = der.nextSiblingOf(tbsPtr);
+        uint256 innerAlgorithm = _nextCRLNode(der, tbs, field);
+        _requireCRLNode(der, tbs, innerAlgorithm, 0x30);
+        _validateCRLAlgorithmIdentifier(der, innerAlgorithm);
+        _validateCRLAlgorithmIdentifier(der, outerAlgorithm);
+        if (keccak256(der.allBytesAt(innerAlgorithm)) != keccak256(der.allBytesAt(outerAlgorithm))) {
+            revert InvalidCRLFormat();
         }
 
-        // Extract extensions (tag 0xA0 = context-specific)
-        if (tbsPtr != 0 && bytes1(der[tbsPtr.ixs()]) == 0xA0) {
-            // Check for Delta CRL Indicator - reject if present
-            // Delta CRLs only contain changes since a base CRL, which could miss revoked certificates
-            uint256 deltaCrlPtr = _findCRLExtensionValue(der, tbsPtr, DELTA_CRL_INDICATOR_OID);
-            if (deltaCrlPtr != 0) {
-                revert DeltaCRLNotSupported();
-            }
+        field = _nextCRLNode(der, tbs, innerAlgorithm);
+        _requireCRLNode(der, tbs, field, 0x30);
+        crl.issuerDN = der.allBytesAt(field);
 
-            // Check for Issuing Distribution Point - reject if present
-            // Partitioned CRLs only cover specific certificate types, which could miss revocations
-            uint256 idpPtr = _findCRLExtensionValue(der, tbsPtr, ISSUING_DISTRIBUTION_POINT_OID);
-            if (idpPtr != 0) {
-                revert PartitionedCRLNotSupported();
-            }
+        field = _nextCRLNode(der, tbs, field);
+        crl.thisUpdate = _parseCRLTimeAt(der, field);
+        field = _nextCRLNode(der, tbs, field);
+        crl.nextUpdate = _parseCRLTimeAt(der, field);
+        if (crl.nextUpdate <= crl.thisUpdate) revert InvalidCRLFormat();
 
-            uint256 akidPtr = _findCRLExtensionValue(der, tbsPtr, CRL_AUTHORITY_KEY_IDENTIFIER_OID);
-            if (akidPtr != 0) {
-                crl.authorityKeyId = _extractAKIDFromExtension(der, akidPtr);
-            }
+        if (field.ixl() == tbs.ixl()) revert CRLMissingNumber();
+        field = _nextCRLNode(der, tbs, field);
+
+        if (uint8(der[field.ixs()]) == 0x30) {
+            crl.revokedSerials = _getCRLRevokedSerials(der, field);
+            if (field.ixl() == tbs.ixl()) revert CRLMissingNumber();
+            field = _nextCRLNode(der, tbs, field);
         }
 
-        // Extract signature
-        uint256 sigPtr = der.nextSiblingOf(tbsParentPtr);
-        sigPtr = der.nextSiblingOf(sigPtr); // Skip signature algorithm
-        crl.signature = _getCRLSignature(der, sigPtr);
+        _requireCRLNode(der, tbs, field, 0xA0);
+        if (field.ixl() != tbs.ixl()) revert InvalidCRLFormat();
+        (crl.authorityKeyId, crl.crlNumber) = _parseCRLExtensions(der, field);
+        crl.signature = _getCRLSignature(der, signaturePtr);
     }
 
     /// @notice Get the signature algorithm OID from a CRL
@@ -1616,132 +1633,279 @@ library LibX509 {
     /// @param der The DER-encoded CRL bytes
     /// @return revoked True if the serial number is in the revoked list
     function isSerialRevokedInCRL(uint256 serialNumber, bytes memory der) internal pure returns (bool revoked) {
-        uint256 root = der.root();
-        uint256 tbsParentPtr = der.firstChildOf(root);
-        uint256 tbsPtr = der.firstChildOf(tbsParentPtr);
-
-        uint256 tag = uint8(der[tbsPtr.ixs()]);
-        if (tag == 0x02) {
-            tbsPtr = der.nextSiblingOf(tbsPtr);
-        }
-
-        tbsPtr = der.nextSiblingOf(tbsPtr); // skip sigAlg
-        tbsPtr = der.nextSiblingOf(tbsPtr); // skip issuer
-        tbsPtr = der.nextSiblingOf(tbsPtr); // skip thisUpdate
-        tbsPtr = der.nextSiblingOf(tbsPtr); // skip nextUpdate
-
-        if (tbsPtr != 0 && bytes1(der[tbsPtr.ixs()]) == 0x30) {
-            return _isSerialInRevokedList(der, tbsPtr, serialNumber);
+        CRLInfo memory crl = _parseCRL(der);
+        for (uint256 i; i < crl.revokedSerials.length; ++i) {
+            if (crl.revokedSerials[i] == serialNumber) return true;
         }
         return false;
     }
 
-    /// @notice Get CRL validity period (thisUpdate and nextUpdate)
-    function _getCRLValidity(bytes calldata der, uint256 validityPtr)
-        private
-        pure
-        returns (uint256 thisUpdate, uint256 nextUpdate)
-    {
-        uint256 thisUpdatePtr = validityPtr;
-        uint256 nextUpdatePtr = der.nextSiblingOf(thisUpdatePtr);
-        thisUpdate = fromDERToTimestamp(der.bytesAt(thisUpdatePtr));
-        nextUpdate = fromDERToTimestamp(der.bytesAt(nextUpdatePtr));
+    function _parseCRLTimeAt(bytes memory der, uint256 timePtr) private pure returns (uint256 timestamp) {
+        uint8 tag = uint8(der[timePtr.ixs()]);
+        if (tag != 0x17 && tag != 0x18) revert InvalidCRLFormat();
+        timestamp = _parseProfileTimestamp(der.bytesAt(timePtr), tag);
     }
 
     /// @notice Extract all revoked serial numbers from CRL
-    function _getCRLRevokedSerials(bytes calldata der, uint256 revokedParentPtr)
+    function _getCRLRevokedSerials(bytes memory der, uint256 revokedParentPtr)
         private
         pure
         returns (uint256[] memory serialNumbers)
     {
-        uint256 revokedPtr = der.firstChildOf(revokedParentPtr);
-        uint256 count = 0;
-
-        // First pass: count the number of revoked certs
-        uint256 tempPtr = revokedPtr;
-        while (tempPtr != 0 && tempPtr.ixl() <= revokedParentPtr.ixl()) {
-            count++;
-            tempPtr = der.nextSiblingOf(tempPtr);
-        }
-
-        // Second pass: extract serial numbers
+        uint256 count = _countCRLChildren(der, revokedParentPtr, 0x30);
         serialNumbers = new uint256[](count);
-        uint256 index = 0;
-        while (revokedPtr != 0 && revokedPtr.ixl() <= revokedParentPtr.ixl()) {
-            uint256 serialPtr = der.firstChildOf(revokedPtr);
-            bytes memory serialBytes = der.bytesAt(serialPtr);
-            serialNumbers[index] = _parseSerialNumber(serialBytes);
-            index++;
-            revokedPtr = der.nextSiblingOf(revokedPtr);
+        uint256 entry = der.firstChildOf(revokedParentPtr);
+        for (uint256 i; i < count; ++i) {
+            serialNumbers[i] = _parseCRLEntry(der, entry);
+            if (i + 1 < count) entry = _nextCRLNode(der, revokedParentPtr, entry);
         }
     }
 
-    /// @notice Check if a serial number exists in the revoked list
-    function _isSerialInRevokedList(bytes memory der, uint256 revokedParentPtr, uint256 targetSerial)
-        private
-        pure
-        returns (bool)
-    {
-        uint256 revokedPtr = der.firstChildOf(revokedParentPtr);
-        while (revokedPtr != 0 && revokedPtr.ixl() <= revokedParentPtr.ixl()) {
-            uint256 serialPtr = der.firstChildOf(revokedPtr);
-            bytes memory serialBytes = der.bytesAt(serialPtr);
-            uint256 serial = _parseSerialNumber(serialBytes);
-            if (serial == targetSerial) {
-                return true;
+    function _parseCRLEntry(bytes memory der, uint256 entry) private pure returns (uint256 serialNumber) {
+        uint256 serialPtr = der.firstChildOf(entry);
+        _requireCRLNode(der, entry, serialPtr, 0x02);
+        serialNumber = _parseSerialNumber(der.bytesAt(serialPtr));
+
+        uint256 revocationDatePtr = _nextCRLNode(der, entry, serialPtr);
+        _parseCRLTimeAt(der, revocationDatePtr);
+
+        if (revocationDatePtr.ixl() == entry.ixl()) return serialNumber;
+        uint256 extensions = _nextCRLNode(der, entry, revocationDatePtr);
+        _requireCRLNode(der, entry, extensions, 0x30);
+        if (extensions.ixl() != entry.ixl()) revert InvalidCRLFormat();
+        _validateCRLEntryExtensions(der, extensions);
+    }
+
+    function _validateCRLEntryExtensions(bytes memory der, uint256 extensions) private pure {
+        uint256 count = _countCRLChildren(der, extensions, 0x30);
+        bytes32[] memory seenOids = new bytes32[](count);
+        uint256 extension = der.firstChildOf(extensions);
+
+        for (uint256 i; i < count; ++i) {
+            (bytes32 oidHash, bool critical, uint256 valuePtr) = _parseCRLExtension(der, extension);
+            for (uint256 j; j < i; ++j) {
+                if (seenOids[j] == oidHash) revert InvalidCRLFormat();
             }
-            revokedPtr = der.nextSiblingOf(revokedPtr);
+            seenOids[i] = oidHash;
+
+            if (oidHash == keccak256(CRL_CERTIFICATE_ISSUER_OID)) revert IndirectCRLNotSupported();
+            if (oidHash == keccak256(CRL_HOLD_INSTRUCTION_CODE_OID)) {
+                revert TemporaryRevocationNotSupported();
+            }
+            if (critical) revert InvalidCRLFormat();
+
+            if (oidHash == keccak256(CRL_REASON_CODE_OID)) {
+                _validateCRLReasonCode(der.bytesAt(valuePtr));
+            } else if (oidHash == keccak256(CRL_INVALIDITY_DATE_OID)) {
+                bytes memory encodedTime = der.bytesAt(valuePtr);
+                if (encodedTime.length < 2) revert InvalidCRLFormat();
+                uint256 timePtr = encodedTime.root();
+                if (
+                    timePtr.ixs() != 0 || timePtr.ixl() + 1 != encodedTime.length
+                        || uint8(encodedTime[timePtr.ixs()]) != 0x18
+                ) revert InvalidCRLFormat();
+                _parseTimestamp(encodedTime.bytesAt(timePtr), 0x18);
+            }
+
+            if (i + 1 < count) extension = _nextCRLNode(der, extensions, extension);
         }
-        return false;
+    }
+
+    function _validateCRLReasonCode(bytes memory encoded) private pure {
+        if (encoded.length != 3 || encoded[0] != 0x0A || encoded[1] != 0x01) revert InvalidCRLFormat();
+        uint8 reason = uint8(encoded[2]);
+        if (reason == 6) revert TemporaryRevocationNotSupported();
+        if (reason == 8) revert DeltaCRLNotSupported();
+        if (reason == 7 || reason > 10) revert InvalidCRLFormat();
     }
 
     /// @notice Extract signature from CRL
-    function _getCRLSignature(bytes calldata der, uint256 sigPtr) private pure returns (bytes memory sig) {
-        // Extract the BIT STRING content (skips the unused bits byte)
-        // The content is a DER-encoded ECDSA signature (SEQUENCE of two INTEGERs)
-        // Return it as-is, just like getCertSignature does
+    function _getCRLSignature(bytes memory der, uint256 sigPtr) private pure returns (bytes memory sig) {
         sig = der.bitstringAt(sigPtr);
         if (sig.length < 64 || sig.length > 512) revert InvalidSignatureSize();
     }
 
-    /// @notice Find extension value in CRL extensions
-    function _findCRLExtensionValue(bytes calldata der, uint256 extensionPtr, bytes memory oid)
+    function _parseCRLExtensions(bytes memory der, uint256 wrapper)
         private
         pure
-        returns (uint256)
+        returns (bytes memory authorityKeyId, uint256 crlNumber)
     {
-        uint256 parentPtr = der.firstChildOf(extensionPtr);
-        uint256 ptr = der.firstChildOf(parentPtr);
+        uint256 extensions = der.firstChildOf(wrapper);
+        _requireCRLNode(der, wrapper, extensions, 0x30);
+        if (extensions.ixl() != wrapper.ixl()) revert InvalidCRLFormat();
 
-        while (ptr != 0 && ptr.ixl() <= parentPtr.ixl()) {
-            uint256 oidPtr = der.firstChildOf(ptr);
-            if (keccak256(der.bytesAt(oidPtr)) == keccak256(oid)) {
-                return der.nextSiblingOf(oidPtr);
+        uint256 count = _countCRLChildren(der, extensions, 0x30);
+        bytes32[] memory seenOids = new bytes32[](count);
+        bool foundNumber;
+        uint256 extension = der.firstChildOf(extensions);
+
+        for (uint256 i; i < count; ++i) {
+            (bytes32 oidHash, bool critical, uint256 valuePtr) = _parseCRLExtension(der, extension);
+            for (uint256 j; j < i; ++j) {
+                if (seenOids[j] == oidHash) revert InvalidCRLFormat();
             }
-            ptr = der.nextSiblingOf(ptr);
+            seenOids[i] = oidHash;
+
+            if (oidHash == keccak256(DELTA_CRL_INDICATOR_OID)) revert DeltaCRLNotSupported();
+            if (oidHash == keccak256(ISSUING_DISTRIBUTION_POINT_OID)) {
+                revert PartitionedCRLNotSupported();
+            }
+            if (critical) revert InvalidCRLFormat();
+
+            if (oidHash == keccak256(CRL_AUTHORITY_KEY_IDENTIFIER_OID)) {
+                authorityKeyId = _extractAKIDFromExtension(der, valuePtr);
+            } else if (oidHash == keccak256(CRL_NUMBER_OID)) {
+                foundNumber = true;
+                crlNumber = _decodeCRLNumber(der.bytesAt(valuePtr));
+            }
+
+            if (i + 1 < count) extension = _nextCRLNode(der, extensions, extension);
         }
-        return 0;
+        if (!foundNumber) revert CRLMissingNumber();
+    }
+
+    function _parseCRLExtension(bytes memory der, uint256 extension)
+        private
+        pure
+        returns (bytes32 oidHash, bool critical, uint256 valuePtr)
+    {
+        uint256 oidPtr = der.firstChildOf(extension);
+        _requireCRLNode(der, extension, oidPtr, 0x06);
+        bytes memory oid = der.bytesAt(oidPtr);
+        if (!_isCanonicalObjectIdentifier(oid)) revert InvalidCRLFormat();
+        oidHash = keccak256(oid);
+
+        valuePtr = _nextCRLNode(der, extension, oidPtr);
+        if (uint8(der[valuePtr.ixs()]) == 0x01) {
+            if (valuePtr.ixf() != valuePtr.ixl() || der[valuePtr.ixf()] != 0xFF) revert InvalidCRLFormat();
+            critical = true;
+            valuePtr = _nextCRLNode(der, extension, valuePtr);
+        }
+        _requireCRLNode(der, extension, valuePtr, 0x04);
+        if (valuePtr.ixl() != extension.ixl()) revert InvalidCRLFormat();
+    }
+
+    function _validateCRLAlgorithmIdentifier(bytes memory der, uint256 algorithm) private pure {
+        uint256 oidPtr = der.firstChildOf(algorithm);
+        _requireCRLNode(der, algorithm, oidPtr, 0x06);
+        bytes memory oid = der.bytesAt(oidPtr);
+        if (!_isCanonicalObjectIdentifier(oid)) revert InvalidCRLFormat();
+        bytes32 oidHash = keccak256(oid);
+        bool hasParameters = oidPtr.ixl() != algorithm.ixl();
+
+        if (oidHash == ECDSA_WITH_SHA256_OID_HASH) {
+            if (hasParameters) revert InvalidCRLFormat();
+            return;
+        }
+        if (oidHash == SHA256_WITH_RSA_OID_HASH) {
+            if (!hasParameters) revert InvalidCRLFormat();
+            uint256 nullStart = oidPtr.ixl() + 1;
+            if (nullStart + 1 != algorithm.ixl() || der[nullStart] != 0x05 || der[nullStart + 1] != 0x00) {
+                revert InvalidCRLFormat();
+            }
+            return;
+        }
+        if (!hasParameters) return;
+
+        uint256 parameterStart = oidPtr.ixl() + 1;
+        if (parameterStart + 1 > algorithm.ixl()) revert InvalidCRLFormat();
+
+        // Asn1Decode deliberately rejects zero-length nodes, so handle the
+        // canonical NULL parameters used by RSA signature algorithms directly.
+        if (der[parameterStart] == 0x05 && der[parameterStart + 1] == 0x00) {
+            if (parameterStart + 1 != algorithm.ixl()) revert InvalidCRLFormat();
+            return;
+        }
+
+        uint256 parameters = der.nextSiblingOf(oidPtr);
+        _requireCRLNode(der, algorithm, parameters, 0);
+        if (parameters.ixl() != algorithm.ixl()) revert InvalidCRLFormat();
+    }
+
+    /// @notice Decode a DER INTEGER wrapped by the CRLNumber extension's OCTET STRING
+    /// @dev RFC 5280 requires a non-negative value of at most 20 content octets.
+    function _decodeCRLNumber(bytes memory encoded) private pure returns (uint256 crlNumber) {
+        if (encoded.length < 3 || encoded[0] != 0x02) {
+            revert InvalidCRLNumber();
+        }
+
+        // A conforming value is at most 20 octets, so canonical DER uses short-form length.
+        uint256 valueLength = uint8(encoded[1]);
+        if (valueLength == 0 || valueLength > 20 || encoded.length != valueLength + 2) {
+            revert InvalidCRLNumber();
+        }
+
+        bytes1 first = encoded[2];
+        if (first & 0x80 != 0) {
+            revert InvalidCRLNumber();
+        }
+        if (valueLength > 1 && first == 0x00 && encoded[3] & 0x80 == 0) {
+            revert InvalidCRLNumber();
+        }
+
+        for (uint256 i = 0; i < valueLength; i++) {
+            crlNumber = (crlNumber << 8) | uint8(encoded[i + 2]);
+        }
     }
 
     /// @notice Extract AKID from extension value
-    function _extractAKIDFromExtension(bytes calldata der, uint256 extnValuePtr)
+    function _extractAKIDFromExtension(bytes memory der, uint256 extnValuePtr)
         private
         pure
         returns (bytes memory akid)
     {
         bytes memory extValue = der.bytesAt(extnValuePtr);
-        uint256 parentPtr = extValue.root();
-        uint256 ptr = extValue.firstChildOf(parentPtr);
-
-        // Look for context tag [0] which contains the keyIdentifier
-        bytes1 contextTag = 0x80;
-        while (ptr != 0 && ptr.ixl() <= parentPtr.ixl()) {
-            bytes1 tag = bytes1(extValue[ptr.ixs()]);
-            if (tag == contextTag) {
-                akid = extValue.bytesAt(ptr);
-                break;
-            }
-            ptr = extValue.nextSiblingOf(ptr);
+        if (extValue.length < 2) revert InvalidCRLFormat();
+        uint256 parent = extValue.root();
+        if (parent.ixs() != 0 || parent.ixl() + 1 != extValue.length || uint8(extValue[parent.ixs()]) != 0x30) {
+            revert InvalidCRLFormat();
         }
+
+        uint256 ptr = extValue.firstChildOf(parent);
+        uint8 previousRank;
+        while (true) {
+            _requireCRLNode(extValue, parent, ptr, 0);
+            uint8 tag = uint8(extValue[ptr.ixs()]);
+            uint8 rank;
+            if (tag == 0x80) rank = 1;
+            else if (tag == 0xA1) rank = 2;
+            else if (tag == 0x82) rank = 3;
+            else revert InvalidCRLFormat();
+            if (rank <= previousRank) revert InvalidCRLFormat();
+            previousRank = rank;
+
+            if (tag == 0x80) {
+                akid = extValue.bytesAt(ptr);
+            }
+            if (ptr.ixl() == parent.ixl()) break;
+            ptr = _nextCRLNode(extValue, parent, ptr);
+        }
+    }
+
+    function _countCRLChildren(bytes memory der, uint256 parent, uint8 expectedTag)
+        private
+        pure
+        returns (uint256 count)
+    {
+        uint256 child = der.firstChildOf(parent);
+        while (true) {
+            _requireCRLNode(der, parent, child, expectedTag);
+            ++count;
+            if (child.ixl() == parent.ixl()) break;
+            child = _nextCRLNode(der, parent, child);
+        }
+    }
+
+    function _requireCRLNode(bytes memory der, uint256 parent, uint256 node, uint8 expectedTag) private pure {
+        if (
+            node == 0 || node.ixs() < parent.ixf() || node.ixl() > parent.ixl()
+                || (expectedTag != 0 && uint8(der[node.ixs()]) != expectedTag)
+        ) revert InvalidCRLFormat();
+    }
+
+    function _nextCRLNode(bytes memory der, uint256 parent, uint256 current) private pure returns (uint256 next) {
+        if (current.ixl() >= parent.ixl()) revert InvalidCRLFormat();
+        next = der.nextSiblingOf(current);
+        _requireCRLNode(der, parent, next, 0);
     }
 }

@@ -14,10 +14,18 @@ import {LibX509Verify} from "src/lib/LibX509Verify.sol";
 import {
     CertificateAlreadyRevoked,
     CRLIssuerMismatch,
+    CRLMissingNumber,
+    InvalidCRLFormat,
+    InvalidCRLNumber,
+    DeltaCRLNotSupported,
+    IndirectCRLNotSupported,
+    TemporaryRevocationNotSupported,
+    InvalidTimeFormat,
     CRLRollbackAttempt,
     CRLRequiredInStrictMode,
     CRLExpiredInStrictMode,
     UnsupportedCriticalCertificateExtension,
+    Asn1InvalidLengthBytes,
     ZeroAddress
 } from "src/types/Errors.sol";
 
@@ -289,12 +297,171 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         return LibX509.parseCRL(crlBytes);
     }
 
+    function _withoutCRLNumber(bytes memory crl) internal pure returns (bytes memory modified) {
+        modified = new bytes(crl.length);
+        for (uint256 i = 0; i < crl.length; i++) {
+            modified[i] = crl[i];
+        }
+
+        // Replace id-ce-cRLNumber (2.5.29.20) with an unknown, same-length OID.
+        // Keeping the DER shape unchanged isolates the mandatory-extension check.
+        for (uint256 i = 0; i + 2 < modified.length; i++) {
+            if (modified[i] == 0x55 && modified[i + 1] == 0x1d && modified[i + 2] == 0x14) {
+                modified[i + 2] = 0x15;
+                return modified;
+            }
+        }
+
+        revert("CRLNumber OID not found in fixture");
+    }
+
+    function _derNode(bytes1 tag, bytes memory content) internal pure returns (bytes memory) {
+        require(content.length > 0, "Synthetic DER nodes must not be empty");
+        if (content.length < 128) {
+            return abi.encodePacked(tag, uint8(content.length), content);
+        }
+        require(content.length <= type(uint8).max, "Synthetic DER node too large");
+        return abi.encodePacked(tag, bytes1(0x81), uint8(content.length), content);
+    }
+
+    function _withLeadingZeroOuterLength(bytes memory crl) internal pure returns (bytes memory modified) {
+        require(crl.length > 4 && crl[0] == 0x30, "Need an outer CRL SEQUENCE");
+        uint8 lengthOfLength = uint8(crl[1]) & 0x7F;
+        require(uint8(crl[1]) & 0x80 != 0 && lengthOfLength < 0x7F, "Need a long-form outer length");
+
+        modified = new bytes(crl.length + 1);
+        modified[0] = crl[0];
+        modified[1] = bytes1(0x80 | (lengthOfLength + 1));
+        modified[2] = 0;
+        for (uint256 i = 2; i < crl.length; ++i) {
+            modified[i + 1] = crl[i];
+        }
+    }
+
+    function _withLongFormSignatureLength(bytes memory crl) internal pure returns (bytes memory modified) {
+        require(crl.length > 4 && crl[0] == 0x30, "Need an outer CRL SEQUENCE");
+        uint8 rootLengthOfLength = uint8(crl[1]) & 0x7F;
+        require(uint8(crl[1]) & 0x80 != 0 && rootLengthOfLength > 0, "Need a long-form outer length");
+
+        uint256 signatureOffset = type(uint256).max;
+        for (uint256 i = 2 + rootLengthOfLength; i + 2 < crl.length; ++i) {
+            uint8 contentLength = uint8(crl[i + 1]);
+            if (crl[i] == 0x03 && contentLength < 128 && i + 2 + contentLength == crl.length) {
+                signatureOffset = i;
+                break;
+            }
+        }
+        require(signatureOffset != type(uint256).max, "Short-form signature BIT STRING not found");
+
+        modified = new bytes(crl.length + 1);
+        for (uint256 i; i <= signatureOffset; ++i) {
+            modified[i] = crl[i];
+        }
+        modified[signatureOffset + 1] = 0x81;
+        for (uint256 i = signatureOffset + 1; i < crl.length; ++i) {
+            modified[i + 1] = crl[i];
+        }
+
+        uint256 lengthByte = 1 + rootLengthOfLength;
+        while (true) {
+            modified[lengthByte] = bytes1(uint8(modified[lengthByte]) + 1);
+            if (modified[lengthByte] != 0) break;
+            require(lengthByte > 2, "Outer CRL length overflow");
+            --lengthByte;
+        }
+    }
+
+    function _crlNumberExtension(bytes memory integerEncoding, bytes memory criticalField)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return _derNode(0x30, abi.encodePacked(hex"0603551D14", criticalField, _derNode(0x04, integerEncoding)));
+    }
+
+    function _unknownCRLExtension(bytes memory criticalField) internal pure returns (bytes memory) {
+        return _derNode(0x30, abi.encodePacked(hex"06032A0304", criticalField, _derNode(0x04, hex"0500")));
+    }
+
+    function _entryExtension(bytes memory oid, bytes memory criticalField, bytes memory value)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return _derNode(0x30, abi.encodePacked(oid, criticalField, _derNode(0x04, value)));
+    }
+
+    function _revokedEntry(bytes memory serial, bytes memory revocationDate, bytes memory extensionPayload)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        bytes memory extensions = extensionPayload.length == 0 ? bytes("") : _derNode(0x30, extensionPayload);
+        return _derNode(0x30, abi.encodePacked(serial, revocationDate, extensions));
+    }
+
+    function _syntheticCRLWithFields(
+        bytes memory innerAlgorithm,
+        bytes memory outerAlgorithm,
+        bytes memory thisUpdate,
+        bytes memory nextUpdate,
+        bytes memory revokedCertificates,
+        bytes memory extensionPayload,
+        bytes memory tbsSuffix,
+        bytes memory outerSuffix
+    ) internal pure returns (bytes memory) {
+        bytes memory issuer = hex"3003020101";
+        bytes memory extensions = _derNode(0xA0, _derNode(0x30, extensionPayload));
+        bytes memory tbs = _derNode(
+            0x30,
+            abi.encodePacked(
+                hex"020101", innerAlgorithm, issuer, thisUpdate, nextUpdate, revokedCertificates, extensions, tbsSuffix
+            )
+        );
+        bytes memory signature = _derNode(0x03, abi.encodePacked(bytes1(0), new bytes(64)));
+        return _derNode(0x30, abi.encodePacked(tbs, outerAlgorithm, signature, outerSuffix));
+    }
+
+    function _syntheticCRLWithEntries(bytes memory entries) internal pure returns (bytes memory) {
+        return _syntheticCRLWithFields(
+            hex"300306012A",
+            hex"300306012A",
+            hex"170D3235313230353036343233365A",
+            hex"170D3236313230353036343233365A",
+            _derNode(0x30, entries),
+            _crlNumberExtension(hex"020101", ""),
+            "",
+            ""
+        );
+    }
+
+    function _syntheticCRLWithVersion(bytes memory versionField, bytes memory extensionPayload)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        bytes memory algorithm = hex"300306012A";
+        bytes memory issuer = hex"3003020101";
+        bytes memory thisUpdate = hex"170D3235313230353036343233365A";
+        bytes memory nextUpdate = hex"170D3236313230353036343233365A";
+        bytes memory extensions = _derNode(0xA0, _derNode(0x30, extensionPayload));
+        bytes memory tbs =
+            _derNode(0x30, abi.encodePacked(versionField, algorithm, issuer, thisUpdate, nextUpdate, extensions));
+        bytes memory signature = _derNode(0x03, abi.encodePacked(bytes1(0), new bytes(64)));
+        return _derNode(0x30, abi.encodePacked(tbs, algorithm, signature));
+    }
+
+    function _syntheticCRL(bytes memory extensionPayload) internal pure returns (bytes memory) {
+        return _syntheticCRLWithVersion(hex"020101", extensionPayload);
+    }
+
     /// @notice Test parsing an empty CRL succeeds
     function test_parseCRL_empty_succeeds() public view {
         bytes memory crlBytes = _loadEmptyCRL();
         CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
 
         assertTrue(crlInfo.issuerDN.length > 0, "Issuer DN should be present");
+        assertEq(crlInfo.crlNumber, 5, "CRL number should be parsed");
         assertTrue(crlInfo.thisUpdate > 0, "thisUpdate should be set");
         assertTrue(crlInfo.nextUpdate > crlInfo.thisUpdate, "nextUpdate should be after thisUpdate");
         assertEq(crlInfo.revokedSerials.length, 0, "Empty CRL should have no revoked certificates");
@@ -308,11 +475,304 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
 
         assertTrue(crlInfo.issuerDN.length > 0, "Issuer DN should be present");
+        assertEq(crlInfo.crlNumber, 6, "CRL number should be parsed");
         assertTrue(crlInfo.thisUpdate > 0, "thisUpdate should be set");
         assertTrue(crlInfo.nextUpdate > crlInfo.thisUpdate, "nextUpdate should be after thisUpdate");
         assertEq(crlInfo.revokedSerials.length, 1, "CRL should have 1 revoked certificate");
         assertTrue(crlInfo.signature.length > 0, "Signature should be present");
         assertTrue(crlInfo.tbs.length > 0, "TBS should be present");
+    }
+
+    function test_parseCRL_outerLengthWithLeadingZero_reverts() public {
+        vm.expectRevert(Asn1InvalidLengthBytes.selector);
+        this._parseCRLHelper(_withLeadingZeroOuterLength(_loadEmptyCRL()));
+    }
+
+    function test_parseCRL_signatureLengthLongFormBelow128_reverts() public {
+        vm.expectRevert(Asn1InvalidLengthBytes.selector);
+        this._parseCRLHelper(_withLongFormSignatureLength(_loadEmptyCRL()));
+    }
+
+    /// @notice Test updateCRL succeeds with valid CRL
+    function test_parseCRL_missingNumber_reverts() public {
+        bytes memory crlWithoutNumber = _withoutCRLNumber(_loadEmptyCRL());
+
+        vm.expectRevert(CRLMissingNumber.selector);
+        this._parseCRLHelper(crlWithoutNumber);
+    }
+
+    function test_parseCRL_numberDERBoundaries_succeeds() public view {
+        CRLInfo memory zero = this._parseCRLHelper(_syntheticCRL(_crlNumberExtension(hex"020100", "")));
+        assertEq(zero.crlNumber, 0, "Zero is a valid first CRL number");
+
+        CRLInfo memory oneByte = this._parseCRLHelper(_syntheticCRL(_crlNumberExtension(hex"02017F", "")));
+        assertEq(oneByte.crlNumber, 127, "One-byte positive number should parse");
+
+        CRLInfo memory signPadded = this._parseCRLHelper(_syntheticCRL(_crlNumberExtension(hex"02020080", "")));
+        assertEq(signPadded.crlNumber, 128, "Required positive sign padding should parse");
+
+        bytes memory maxLengthNumber = abi.encodePacked(hex"02140080", new bytes(18));
+        CRLInfo memory maxLength = this._parseCRLHelper(_syntheticCRL(_crlNumberExtension(maxLengthNumber, "")));
+        assertEq(maxLength.crlNumber, uint256(1) << 151, "20-octet CRL number should parse");
+    }
+
+    function test_parseCRL_invalidNumberEncoding_reverts() public {
+        bytes[] memory invalidIntegers = new bytes[](6);
+        invalidIntegers[0] = hex"030101"; // Wrong inner tag
+        invalidIntegers[1] = hex"0200"; // Empty INTEGER
+        invalidIntegers[2] = hex"020180"; // Negative INTEGER / missing sign padding
+        invalidIntegers[3] = hex"0202007F"; // Redundant sign padding
+        invalidIntegers[4] = hex"02810101"; // Non-canonical long-form length
+        invalidIntegers[5] = hex"02010100"; // Trailing data after INTEGER
+
+        for (uint256 i = 0; i < invalidIntegers.length; i++) {
+            vm.expectRevert(InvalidCRLNumber.selector);
+            this._parseCRLHelper(_syntheticCRL(_crlNumberExtension(invalidIntegers[i], "")));
+        }
+
+        bytes memory tooLongNumber = abi.encodePacked(hex"02150080", new bytes(19));
+        vm.expectRevert(InvalidCRLNumber.selector);
+        this._parseCRLHelper(_syntheticCRL(_crlNumberExtension(tooLongNumber, "")));
+    }
+
+    function test_parseCRL_criticalOrDuplicateNumber_reverts() public {
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRL(_crlNumberExtension(hex"020101", hex"0101FF")));
+
+        // A DER DEFAULT FALSE field must be omitted, so explicit FALSE is invalid too.
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRL(_crlNumberExtension(hex"020101", hex"010100")));
+
+        bytes memory extension = _crlNumberExtension(hex"020101", "");
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRL(abi.encodePacked(extension, extension)));
+    }
+
+    function test_parseCRL_extensionsWithoutV2Version_reverts() public {
+        bytes memory numberExtension = _crlNumberExtension(hex"020101", "");
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRLWithVersion("", numberExtension));
+    }
+
+    function test_parseCRL_extensionsWithInvalidVersion_reverts() public {
+        bytes memory numberExtension = _crlNumberExtension(hex"020101", "");
+        bytes[] memory invalidVersions = new bytes[](3);
+        invalidVersions[0] = hex"020100"; // v1 is not allowed when extensions are present
+        invalidVersions[1] = hex"020102"; // only v2(1) is defined for CRLs
+        invalidVersions[2] = hex"0A0101"; // Version must be an INTEGER, not ENUMERATED
+
+        for (uint256 i = 0; i < invalidVersions.length; i++) {
+            vm.expectRevert(InvalidCRLFormat.selector);
+            this._parseCRLHelper(_syntheticCRLWithVersion(invalidVersions[i], numberExtension));
+        }
+    }
+
+    function test_parseCRL_unknownNonCriticalExtension_succeeds() public view {
+        bytes memory extensions = abi.encodePacked(_crlNumberExtension(hex"020107", ""), _unknownCRLExtension(""));
+
+        CRLInfo memory crlInfo = this._parseCRLHelper(_syntheticCRL(extensions));
+
+        assertEq(crlInfo.crlNumber, 7, "Unknown non-critical extension should be ignored");
+    }
+
+    function test_parseCRL_unknownCriticalExtension_reverts() public {
+        bytes memory extensions =
+            abi.encodePacked(_crlNumberExtension(hex"020107", ""), _unknownCRLExtension(hex"0101FF"));
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRL(extensions));
+    }
+
+    function test_parseCRL_unknownExtensionWithExplicitDefaultFalse_reverts() public {
+        bytes memory extensions =
+            abi.encodePacked(_crlNumberExtension(hex"020107", ""), _unknownCRLExtension(hex"010100"));
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRL(extensions));
+    }
+
+    function test_parseCRL_envelopeAndAlgorithmMismatch_reverts() public {
+        bytes memory algorithm = hex"300306012A";
+        bytes memory thisUpdate = hex"170D3235313230353036343233365A";
+        bytes memory nextUpdate = hex"170D3236313230353036343233365A";
+        bytes memory number = _crlNumberExtension(hex"020101", "");
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithFields(algorithm, hex"300306012B", thisUpdate, nextUpdate, "", number, "", "")
+        );
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithFields(algorithm, hex"300506012A0500", thisUpdate, nextUpdate, "", number, "", "")
+        );
+
+        // ecdsa-with-SHA256 parameters must be absent; sha256WithRSAEncryption
+        // parameters must be the canonical NULL value.
+        bytes memory ecdsaWithNull = hex"300C06082A8648CE3D0403020500";
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithFields(ecdsaWithNull, ecdsaWithNull, thisUpdate, nextUpdate, "", number, "", "")
+        );
+
+        bytes memory rsaWithoutNull = hex"300B06092A864886F70D01010B";
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithFields(rsaWithoutNull, rsaWithoutNull, thisUpdate, nextUpdate, "", number, "", "")
+        );
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(abi.encodePacked(_syntheticCRL(number), hex"00"));
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithFields(algorithm, algorithm, thisUpdate, nextUpdate, "", number, hex"020101", "")
+        );
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithFields(algorithm, algorithm, thisUpdate, nextUpdate, "", number, "", hex"020101")
+        );
+    }
+
+    function test_parseCRL_strictTimes_reverts() public {
+        bytes memory algorithm = hex"300306012A";
+        bytes memory validTime = hex"170D3235313230353036343233365A";
+        bytes memory laterTime = hex"170D3236313230353036343233365A";
+        bytes memory number = _crlNumberExtension(hex"020101", "");
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithFields(
+                algorithm, algorithm, hex"160D3235313230353036343233365A", laterTime, "", number, "", ""
+            )
+        );
+
+        vm.expectRevert(InvalidTimeFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithFields(
+                algorithm,
+                algorithm,
+                hex"170D3235303233303036343233365A", // 2025-02-30
+                laterTime,
+                "",
+                number,
+                "",
+                ""
+            )
+        );
+
+        vm.expectRevert(InvalidTimeFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithFields(
+                algorithm,
+                algorithm,
+                hex"180F32303235313230353036343233365A", // GeneralizedTime before 2050
+                laterTime,
+                "",
+                number,
+                "",
+                ""
+            )
+        );
+
+        bytes[] memory malformedTimes = new bytes[](3);
+        malformedTimes[0] = _derNode(0x17, bytes("25120506423Z")); // too short
+        malformedTimes[1] = _derNode(0x17, bytes("25120A064236Z")); // non-digit
+        malformedTimes[2] = _derNode(0x17, bytes("251205064236X")); // not UTC Z
+        for (uint256 i; i < malformedTimes.length; ++i) {
+            vm.expectRevert(InvalidTimeFormat.selector);
+            this._parseCRLHelper(
+                _syntheticCRLWithFields(algorithm, algorithm, malformedTimes[i], laterTime, "", number, "", "")
+            );
+        }
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRLWithFields(algorithm, algorithm, validTime, validTime, "", number, "", ""));
+    }
+
+    function test_parseCRL_entryReasonAndUnknownNonCritical_succeeds() public view {
+        bytes memory reason = _entryExtension(hex"0603551D15", "", hex"0A0101");
+        bytes memory unknown = _entryExtension(hex"06032A0304", "", hex"0500");
+        bytes memory invalidityDate = _entryExtension(hex"0603551D18", "", hex"180F32303235313230343036343233365A");
+        bytes memory entry = _revokedEntry(
+            hex"020101", hex"170D3235313230343036343233365A", abi.encodePacked(reason, unknown, invalidityDate)
+        );
+
+        CRLInfo memory crl = this._parseCRLHelper(_syntheticCRLWithEntries(entry));
+        assertEq(crl.revokedSerials.length, 1);
+        assertEq(crl.revokedSerials[0], 1);
+    }
+
+    function test_parseCRL_entryTemporaryReasons_revert() public {
+        bytes memory date = hex"170D3235313230343036343233365A";
+
+        bytes memory hold = _entryExtension(hex"0603551D15", "", hex"0A0106");
+        vm.expectRevert(TemporaryRevocationNotSupported.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, hold)));
+
+        bytes memory removeFromCRL = _entryExtension(hex"0603551D15", "", hex"0A0108");
+        vm.expectRevert(DeltaCRLNotSupported.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, removeFromCRL)));
+
+        bytes memory holdInstruction = _entryExtension(hex"0603551D17", "", hex"06012A");
+        vm.expectRevert(TemporaryRevocationNotSupported.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, holdInstruction)));
+    }
+
+    function test_parseCRL_certificateIssuerEntryExtension_reverts() public {
+        bytes memory date = hex"170D3235313230343036343233365A";
+        bytes memory value = hex"3003020101";
+
+        bytes memory nonCritical = _entryExtension(hex"0603551D1D", "", value);
+        vm.expectRevert(IndirectCRLNotSupported.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, nonCritical)));
+
+        bytes memory critical = _entryExtension(hex"0603551D1D", hex"0101FF", value);
+        vm.expectRevert(IndirectCRLNotSupported.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, critical)));
+    }
+
+    function test_parseCRL_malformedEntryAndExtensions_revert() public {
+        bytes memory date = hex"170D3235313230343036343233365A";
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_derNode(0x30, hex"020101")));
+
+        // The serial INTEGER crosses its revoked-entry SEQUENCE boundary.
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(hex"3003020201"));
+
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"030101", date, "")));
+
+        bytes memory unknownCritical = _entryExtension(hex"06032A0304", hex"0101FF", hex"0500");
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, unknownCritical)));
+
+        bytes memory explicitFalse = _entryExtension(hex"0603551D15", hex"010100", hex"0A0101");
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, explicitFalse)));
+
+        bytes memory reason = _entryExtension(hex"0603551D15", "", hex"0A0101");
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(
+            _syntheticCRLWithEntries(_revokedEntry(hex"020101", date, abi.encodePacked(reason, reason)))
+        );
+
+        bytes memory invalidReason = _entryExtension(hex"0603551D15", "", hex"0A0107");
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, invalidReason)));
+
+        bytes memory utcInvalidityDate = _entryExtension(hex"0603551D18", "", date);
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRLWithEntries(_revokedEntry(hex"020101", date, utcInvalidityDate)));
+
+        // The child Extension claims two bytes beyond its Extensions parent,
+        // while remaining within the overall CRL byte array.
+        vm.expectRevert(InvalidCRLFormat.selector);
+        this._parseCRLHelper(_syntheticCRL(hex"300A06032A0304040100"));
     }
 
     /// @notice Test updateCRL succeeds with valid CRL
