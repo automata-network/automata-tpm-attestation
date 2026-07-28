@@ -235,6 +235,14 @@ Manage trusted Certificate Authorities (owner only).
 
 Verify a certificate chain against trusted CAs.
 
+Certificate extensions are parsed as bounded, canonical DER before the path is
+accepted. Duplicate extension OIDs and unsupported critical extensions are
+rejected. Critical `BasicConstraints` and `KeyUsage` are supported because their
+semantics are enforced during path validation. `NameConstraints` is rejected,
+whether marked critical or not, until path-wide name-constraint processing is
+implemented. The signed and outer certificate `AlgorithmIdentifier` encodings
+must also match exactly.
+
 #### `verifyCertSignature(bytes cert, CertPubkey issuer)`
 
 Verify a certificate's signature using the issuer's public key (supports RSA and ECDSA).

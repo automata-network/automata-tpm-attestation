@@ -17,6 +17,7 @@ import {
     CRLRollbackAttempt,
     CRLRequiredInStrictMode,
     CRLExpiredInStrictMode,
+    UnsupportedCriticalCertificateExtension,
     ZeroAddress
 } from "src/types/Errors.sol";
 
@@ -129,6 +130,30 @@ contract CertChainRegistry_VerifyCertChain_Integration_Test is CertChainRegistry
         bytes[] memory gcpTdxTpmCerts = _loadCertificate("gcp_tdx_tpm_certs");
         registry.addCA(gcpTdxTpmCerts[2]);
         registry.verifyCertChain(gcpTdxTpmCerts);
+    }
+
+    function test_addCA_unknownCriticalExtension_reverts() public {
+        bytes memory root = _loadCertificate("gcp_snp_vek_certs")[2];
+        bytes memory keyUsage = hex"0603551d0f0101ff";
+        bool mutated;
+        for (uint256 i; i + keyUsage.length <= root.length; ++i) {
+            bool matches = true;
+            for (uint256 j; j < keyUsage.length; ++j) {
+                if (root[i + j] != keyUsage[j]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                root[i + 4] = 0x7F; // unknown 2.5.29.127, still marked critical
+                mutated = true;
+                break;
+            }
+        }
+        require(mutated, "KeyUsage fixture pattern not found");
+
+        vm.expectRevert(UnsupportedCriticalCertificateExtension.selector);
+        registry.addCA(root);
     }
 }
 

@@ -73,6 +73,16 @@ error EcdsaComponentTooLarge();
 
 // --- Certificate Format Errors ---
 error InvalidAsn1Tag();
+/// @dev The signed and outer certificate signature AlgorithmIdentifiers differ.
+error CertificateSignatureAlgorithmMismatch();
+/// @dev Certificate Extensions or an Extension field is not canonical, bounded DER.
+error InvalidCertificateExtensions();
+/// @dev Extension identifiers must be unique within one certificate.
+error DuplicateCertificateExtension();
+/// @dev Critical extensions are accepted only when their semantics are enforced.
+error UnsupportedCriticalCertificateExtension();
+/// @dev Name constraints require path-wide processing and are rejected until implemented.
+error NameConstraintsNotSupported();
 
 // --- CA Constraints Errors ---
 error LeafCertHasPathLen();

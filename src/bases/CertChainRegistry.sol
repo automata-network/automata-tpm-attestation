@@ -362,6 +362,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
 
     /// @dev Verify individual certificate (validity, constraints, revocation)
     function _verifyCertificateConstraints(bytes calldata cert, bool isLeaf, uint256 pathLen) internal view {
+        LibX509.validateCertificateExtensions(cert);
         LibX509.checkCertValidity(cert);
         LibX509.checkCAConstraints(cert, pathLen, isLeaf);
 

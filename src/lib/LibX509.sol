@@ -48,7 +48,12 @@ import {
     IssuerCertMissingSKID,
     InvalidSerialNumber,
     DeltaCRLNotSupported,
-    PartitionedCRLNotSupported
+    PartitionedCRLNotSupported,
+    InvalidCertificateExtensions,
+    DuplicateCertificateExtension,
+    UnsupportedCriticalCertificateExtension,
+    NameConstraintsNotSupported,
+    CertificateSignatureAlgorithmMismatch
 } from "../types/Errors.sol";
 
 using LibX509 for CertPubkey global;
@@ -801,6 +806,216 @@ library LibX509 {
         }
     }
 
+    bytes32 private constant KEY_USAGE_EXTENSION_OID_HASH = keccak256(hex"551D0F");
+    bytes32 private constant BASIC_CONSTRAINTS_EXTENSION_OID_HASH = keccak256(hex"551D13");
+    bytes32 private constant NAME_CONSTRAINTS_EXTENSION_OID_HASH = keccak256(hex"551D1E");
+    bytes32 private constant SHA256_WITH_RSA_OID_HASH = keccak256(hex"2A864886F70D01010B");
+    bytes32 private constant ECDSA_WITH_SHA256_OID_HASH = keccak256(hex"2A8648CE3D040302");
+
+    /// @notice Validates the complete certificate Extensions field before any
+    ///         extension value is used for path validation.
+    /// @dev Externally linked so the strict parser does not inflate consuming
+    ///      contracts. Unknown non-critical extensions are retained for profile
+    ///      compatibility; unknown critical extensions fail closed. NameConstraints
+    ///      is rejected until its path-wide semantics are implemented.
+    function validateCertificateExtensions(bytes calldata der) external pure {
+        bytes memory certificate = der;
+        uint256 root = certificate.root();
+        if (
+            certificate.length == 0 || uint8(certificate[root.ixs()]) != 0x30 || root.ixs() != 0
+                || root.ixl() + 1 != certificate.length
+        ) {
+            revert InvalidCertificateExtensions();
+        }
+
+        uint256 tbs = certificate.firstChildOf(root);
+        _requireCertificateNode(certificate, root, tbs, 0x30);
+        uint256 outerAlgorithm = _nextCertificateNode(certificate, root, tbs);
+        _requireCertificateNode(certificate, root, outerAlgorithm, 0x30);
+        uint256 signatureValue = _nextCertificateNode(certificate, root, outerAlgorithm);
+        _requireCertificateNode(certificate, root, signatureValue, 0x03);
+        if (signatureValue.ixl() != root.ixl()) revert InvalidCertificateExtensions();
+        _validateCertificateAlgorithmIdentifier(certificate, outerAlgorithm);
+
+        uint256 field = certificate.firstChildOf(tbs);
+        _requireCertificateNode(certificate, tbs, field, 0);
+
+        uint8 version;
+        if (uint8(certificate[field.ixs()]) == 0xA0) {
+            uint256 versionPtr = certificate.firstChildOf(field);
+            _requireCertificateNode(certificate, field, versionPtr, 0x02);
+            if (
+                versionPtr.ixl() != field.ixl() || versionPtr.ixf() != versionPtr.ixl()
+                    || uint8(certificate[versionPtr.ixf()]) > 2
+            ) {
+                revert InvalidCertificateExtensions();
+            }
+            version = uint8(certificate[versionPtr.ixf()]);
+            field = _nextCertificateNode(certificate, tbs, field);
+        }
+
+        // serialNumber, signature, issuer, validity, subject, subjectPublicKeyInfo
+        for (uint256 i; i < 6; ++i) {
+            uint8 expectedTag = i == 0 ? 0x02 : 0x30;
+            _requireCertificateNode(certificate, tbs, field, expectedTag);
+            if (i == 1) {
+                _validateCertificateAlgorithmIdentifier(certificate, field);
+                if (keccak256(certificate.allBytesAt(field)) != keccak256(certificate.allBytesAt(outerAlgorithm))) {
+                    revert CertificateSignatureAlgorithmMismatch();
+                }
+            }
+            if (i != 5) {
+                field = _nextCertificateNode(certificate, tbs, field);
+            }
+        }
+
+        // issuerUniqueID [1] and subjectUniqueID [2] are permitted in order.
+        bool sawIssuerUniqueId;
+        bool sawSubjectUniqueId;
+        while (field.ixl() < tbs.ixl()) {
+            field = _nextCertificateNode(certificate, tbs, field);
+            uint8 tag = uint8(certificate[field.ixs()]);
+            if (tag == 0x81 && !sawIssuerUniqueId && !sawSubjectUniqueId) {
+                sawIssuerUniqueId = true;
+            } else if (tag == 0x82 && !sawSubjectUniqueId) {
+                sawSubjectUniqueId = true;
+            } else if (tag == 0xA3) {
+                if (version != 2 || field.ixl() != tbs.ixl()) revert InvalidCertificateExtensions();
+                _validateCertificateExtensionsField(certificate, field);
+                return;
+            } else {
+                revert InvalidCertificateExtensions();
+            }
+        }
+    }
+
+    function _validateCertificateExtensionsField(bytes memory der, uint256 wrapper) private pure {
+        uint256 extensions = der.firstChildOf(wrapper);
+        _requireCertificateNode(der, wrapper, extensions, 0x30);
+        if (extensions.ixl() != wrapper.ixl()) revert InvalidCertificateExtensions();
+
+        uint256 extension = der.firstChildOf(extensions);
+        uint256 count;
+        while (true) {
+            _requireCertificateNode(der, extensions, extension, 0x30);
+            ++count;
+            if (extension.ixl() == extensions.ixl()) break;
+            extension = _nextCertificateNode(der, extensions, extension);
+        }
+
+        bytes32[] memory seenOids = new bytes32[](count);
+        extension = der.firstChildOf(extensions);
+        for (uint256 i; i < count; ++i) {
+            (bytes32 oidHash, bool critical) = _validateCertificateExtension(der, extension);
+            for (uint256 j; j < i; ++j) {
+                if (seenOids[j] == oidHash) revert DuplicateCertificateExtension();
+            }
+            seenOids[i] = oidHash;
+
+            if (oidHash == NAME_CONSTRAINTS_EXTENSION_OID_HASH) revert NameConstraintsNotSupported();
+            if (critical && oidHash != KEY_USAGE_EXTENSION_OID_HASH && oidHash != BASIC_CONSTRAINTS_EXTENSION_OID_HASH)
+            {
+                revert UnsupportedCriticalCertificateExtension();
+            }
+
+            if (i + 1 < count) extension = _nextCertificateNode(der, extensions, extension);
+        }
+    }
+
+    function _validateCertificateExtension(bytes memory der, uint256 extension)
+        private
+        pure
+        returns (bytes32 oidHash, bool critical)
+    {
+        uint256 oidPtr = der.firstChildOf(extension);
+        _requireCertificateNode(der, extension, oidPtr, 0x06);
+        bytes memory oid = der.bytesAt(oidPtr);
+        _validateObjectIdentifier(oid);
+        oidHash = keccak256(oid);
+
+        uint256 valuePtr = _nextCertificateNode(der, extension, oidPtr);
+        if (uint8(der[valuePtr.ixs()]) == 0x01) {
+            // DER omits DEFAULT FALSE; an explicitly encoded BOOLEAN must be TRUE.
+            if (valuePtr.ixf() != valuePtr.ixl() || der[valuePtr.ixf()] != 0xFF) {
+                revert InvalidCertificateExtensions();
+            }
+            critical = true;
+            valuePtr = _nextCertificateNode(der, extension, valuePtr);
+        }
+
+        _requireCertificateNode(der, extension, valuePtr, 0x04);
+        if (valuePtr.ixl() != extension.ixl()) revert InvalidCertificateExtensions();
+    }
+
+    function _validateObjectIdentifier(bytes memory oid) private pure {
+        if (!_isCanonicalObjectIdentifier(oid)) revert InvalidCertificateExtensions();
+    }
+
+    function _validateCertificateAlgorithmIdentifier(bytes memory der, uint256 algorithm) private pure {
+        uint256 oidPtr = der.firstChildOf(algorithm);
+        _requireCertificateNode(der, algorithm, oidPtr, 0x06);
+        bytes memory oid = der.bytesAt(oidPtr);
+        _validateObjectIdentifier(oid);
+        bytes32 oidHash = keccak256(oid);
+        bool hasParameters = oidPtr.ixl() != algorithm.ixl();
+
+        if (oidHash == ECDSA_WITH_SHA256_OID_HASH) {
+            if (hasParameters) revert InvalidCertificateExtensions();
+            return;
+        }
+        if (oidHash == SHA256_WITH_RSA_OID_HASH) {
+            if (!hasParameters) revert InvalidCertificateExtensions();
+            uint256 nullStart = oidPtr.ixl() + 1;
+            if (nullStart + 1 != algorithm.ixl() || der[nullStart] != 0x05 || der[nullStart + 1] != 0x00) {
+                revert InvalidCertificateExtensions();
+            }
+            return;
+        }
+        if (!hasParameters) return;
+
+        uint256 parameterStart = oidPtr.ixl() + 1;
+        if (parameterStart + 1 > algorithm.ixl()) revert InvalidCertificateExtensions();
+        if (der[parameterStart] == 0x05 && der[parameterStart + 1] == 0x00) {
+            if (parameterStart + 1 != algorithm.ixl()) revert InvalidCertificateExtensions();
+            return;
+        }
+
+        uint256 parameters = der.nextSiblingOf(oidPtr);
+        _requireCertificateNode(der, algorithm, parameters, 0);
+        if (parameters.ixl() != algorithm.ixl()) revert InvalidCertificateExtensions();
+    }
+
+    function _isCanonicalObjectIdentifier(bytes memory oid) private pure returns (bool) {
+        if (oid.length == 0) return false;
+        bool startsSubidentifier = true;
+        for (uint256 i; i < oid.length; ++i) {
+            uint8 octet = uint8(oid[i]);
+            // Base-128 subidentifiers must use their shortest encoding.
+            if (startsSubidentifier && octet == 0x80) return false;
+            startsSubidentifier = (octet & 0x80) == 0;
+        }
+        return startsSubidentifier;
+    }
+
+    function _requireCertificateNode(bytes memory der, uint256 parent, uint256 node, uint8 expectedTag) private pure {
+        if (
+            node == 0 || node.ixs() < parent.ixf() || node.ixl() > parent.ixl()
+                || (expectedTag != 0 && uint8(der[node.ixs()]) != expectedTag)
+        ) {
+            revert InvalidCertificateExtensions();
+        }
+    }
+
+    function _nextCertificateNode(bytes memory der, uint256 parent, uint256 current)
+        private
+        pure
+        returns (uint256 next)
+    {
+        if (current.ixl() >= parent.ixl()) revert InvalidCertificateExtensions();
+        next = der.nextSiblingOf(current);
+        _requireCertificateNode(der, parent, next, 0);
+    }
+
     /// @dev Validates CA certificate constraints during chain verification
     /// @notice This function checks BasicConstraints (CA flag, pathLen) and KeyUsage (keyCertSign) for CA certificates
     /// @param der The DER-encoded certificate bytes
@@ -853,7 +1068,7 @@ library LibX509 {
     /// }
     /// Per RFC 5280 Section 4.2.1.9: "The pathLenConstraint field is meaningful only if the cA boolean is asserted"
     /// Therefore, hasPathLen and pathLen will only have meaningful values when isCA is TRUE.
-    /// @notice Empty sequence (0x3000) is treated as not exists
+    /// @notice Empty sequence (0x3000) has no effective CA constraint
     /// @param der The DER-encoded certificate bytes
     /// @return exists Whether the BasicConstraints extension exists
     /// @return isCA Whether this certificate is a CA certificate
@@ -871,58 +1086,49 @@ library LibX509 {
             return (false, false, false, 0);
         }
 
-        // BasicConstraints is encoded as a SEQUENCE within an OCTET STRING
-        // bcValue should contain: [SEQUENCE tag][length][content...]
-        // Validate SEQUENCE structure: minimum length is 2 bytes (tag + length)
+        // BasicConstraints is encoded as a SEQUENCE within an OCTET STRING.
         if (bcValue.length < 2 || bcValue[0] != 0x30) {
             revert InvalidBasicConstraintsFormat();
         }
 
-        // Check for empty SEQUENCE (0x3000)
+        // cA defaults to false when the sequence is empty.
         if (bcValue.length == 2 && bcValue[1] == 0x00) {
             return (false, false, false, 0);
         }
 
-        exists = true;
         uint256 seqPtr = bcValue.root();
+        if (seqPtr.ixs() != 0 || seqPtr.ixl() + 1 != bcValue.length) revert InvalidBasicConstraintsFormat();
+
         uint256 firstChild = bcValue.firstChildOf(seqPtr);
-        if (firstChild == 0) {
-            return (exists, false, false, 0);
-        }
-        uint256 tag = uint8(bcValue[firstChild.ixs()]);
+        if (
+            firstChild.ixs() < seqPtr.ixf() || firstChild.ixl() > seqPtr.ixl()
+                || uint8(bcValue[firstChild.ixs()]) != 0x01
+        ) revert InvalidBasicConstraintsFormat();
 
-        // First element is BOOLEAN (tag 0x01) - this is the cA field
-        if (tag == 0x01) {
-            uint256 len = firstChild.ixl() + 1 - firstChild.ixf();
-            if (len != 1) revert InvalidBooleanLength();
-            isCA = bcValue[firstChild.ixf()] != 0x00;
+        // DER omits DEFAULT FALSE and encodes TRUE canonically as 0xff.
+        if (firstChild.ixf() != firstChild.ixl()) revert InvalidBooleanLength();
+        if (bcValue[firstChild.ixf()] != 0xFF) revert InvalidBasicConstraintsFormat();
+        exists = true;
+        isCA = true;
 
-            // If cA is FALSE, we're done (pathLen is only meaningful when cA is TRUE)
-            // This also ensures forward compatibility: we ignore any additional fields
-            if (!isCA) {
-                return (exists, false, false, 0);
-            }
+        if (firstChild.ixl() == seqPtr.ixl()) return (exists, isCA, false, 0);
 
-            // cA is TRUE: check for optional pathLenConstraint (INTEGER tag 0x02)
-            uint256 nextNodeStart = firstChild.ixl() + 1 + len;
-            if (nextNodeStart + 1 < bcValue.length) {
-                uint256 nextSibling = bcValue.nextSiblingOf(firstChild);
-                if (nextSibling != 0) {
-                    uint256 nextTag = uint8(bcValue[nextSibling.ixs()]);
-                    // Only read if it's an INTEGER (pathLenConstraint)
-                    // Ignore other tags for forward compatibility with future extensions
-                    if (nextTag == 0x02) {
-                        hasPathLen = true;
-                        pathLen = bcValue.uintAt(nextSibling);
-                    }
-                }
-            }
-        } else {
-            // First element is not BOOLEAN, treat as: cA defaults to FALSE, no pathLen
-            return (exists, false, false, 0);
-        }
+        uint256 pathLenPtr = bcValue.nextSiblingOf(firstChild);
+        if (
+            pathLenPtr.ixs() < seqPtr.ixf() || pathLenPtr.ixl() != seqPtr.ixl()
+                || uint8(bcValue[pathLenPtr.ixs()]) != 0x02
+        ) revert InvalidBasicConstraintsFormat();
 
-        return (exists, isCA, hasPathLen, pathLen);
+        uint256 integerLength = pathLenPtr.ixl() + 1 - pathLenPtr.ixf();
+        if (
+            integerLength == 0 || integerLength > 32 || uint8(bcValue[pathLenPtr.ixf()]) >= 0x80
+                || (integerLength > 1
+                    && bcValue[pathLenPtr.ixf()] == 0x00
+                    && uint8(bcValue[pathLenPtr.ixf() + 1]) < 0x80)
+        ) revert InvalidBasicConstraintsFormat();
+
+        hasPathLen = true;
+        pathLen = bcValue.uintAt(pathLenPtr);
     }
 
     /// @dev Extracts KeyUsage extension from an X.509 certificate
@@ -958,16 +1164,34 @@ library LibX509 {
 
         uint8 length = uint8(kuValue[1]);
         uint8 unusedBits = uint8(kuValue[2]);
-        if (unusedBits >= 8 || kuValue.length < 2 + length) revert InvalidBitString();
+        // Content is one unused-bits octet plus one or two data octets (KeyUsage has 9 bits).
+        if (length < 2 || length > 3 || unusedBits >= 8 || kuValue.length != 2 + length) {
+            revert InvalidBitString();
+        }
+
         uint256 dataLength = length - 1;
+        uint8 lastData = uint8(kuValue[kuValue.length - 1]);
+        uint8 paddingMask = uint8((uint256(1) << unusedBits) - 1);
+        // Do not require unusedBits to equal the trailing-zero count. The
+        // AMD SEV-Milan intermediate uses 03 02 01 04 with an extra named
+        // zero bit; its semantics are unambiguous, but declared padding must
+        // still be all zero.
+        if ((lastData & paddingMask) != 0 || lastData == 0) {
+            revert InvalidBitString();
+        }
+
+        // KeyUsage defines only bits 0..8. A second data octet can therefore
+        // contain only decipherOnly (bit 8), followed by seven unused bits.
+        if (dataLength == 2 && (lastData != 0x80 || unusedBits != 7)) {
+            revert InvalidBitString();
+        }
+
         uint16 keyUsage = 0;
-        if (dataLength >= 1) {
-            // First byte contains bits 0-7 (MSB ordering)
-            keyUsage = uint16(uint8(kuValue[3])) << 8;
-            if (dataLength >= 2) {
-                // Second byte contains bits 8+ (e.g., decipherOnly at bit 8)
-                keyUsage |= uint16(uint8(kuValue[4]));
-            }
+        // First byte contains bits 0-7 (MSB ordering)
+        keyUsage = uint16(uint8(kuValue[3])) << 8;
+        if (dataLength == 2) {
+            // Second byte contains bit 8 (decipherOnly)
+            keyUsage |= uint16(uint8(kuValue[4]));
         }
 
         return (true, keyUsage);
@@ -1028,29 +1252,11 @@ library LibX509 {
     /// @param x509Time The ASN.1 time string bytes
     /// @return Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
     function fromDERToTimestamp(bytes memory x509Time) internal pure returns (uint256) {
-        uint16 yrs;
-        uint8 mnths;
-        uint8 dys;
-        uint8 hrs;
-        uint8 mins;
-        uint8 secs;
-        uint8 offset;
-
-        if (x509Time.length == 13) {
-            if (uint8(x509Time[0]) - 48 < 5) yrs += 2000;
-            else yrs += 1900;
-        } else {
-            yrs += (uint8(x509Time[0]) - 48) * 1000 + (uint8(x509Time[1]) - 48) * 100;
-            offset = 2;
-        }
-        yrs += (uint8(x509Time[offset + 0]) - 48) * 10 + uint8(x509Time[offset + 1]) - 48;
-        mnths = (uint8(x509Time[offset + 2]) - 48) * 10 + uint8(x509Time[offset + 3]) - 48;
-        dys += (uint8(x509Time[offset + 4]) - 48) * 10 + uint8(x509Time[offset + 5]) - 48;
-        hrs += (uint8(x509Time[offset + 6]) - 48) * 10 + uint8(x509Time[offset + 7]) - 48;
-        mins += (uint8(x509Time[offset + 8]) - 48) * 10 + uint8(x509Time[offset + 9]) - 48;
-        secs += (uint8(x509Time[offset + 10]) - 48) * 10 + uint8(x509Time[offset + 11]) - 48;
-
-        return DateTimeLib.dateTimeToTimestamp(yrs, mnths, dys, hrs, mins, secs);
+        uint8 tag;
+        if (x509Time.length == 13) tag = 0x17;
+        else if (x509Time.length == 15) tag = 0x18;
+        else revert InvalidTimeFormat();
+        return _parseProfileTimestamp(x509Time, tag);
     }
 
     /// @notice Extracts and validates the SubjectPublicKeyInfo structure from an X.509 certificate
@@ -1161,8 +1367,8 @@ library LibX509 {
             revert InvalidTimeTag(notAfterTag);
         }
 
-        notBefore = _parseTimestamp(der.bytesAt(notBeforePtr), notBeforeTag);
-        notAfter = _parseTimestamp(der.bytesAt(notAfterPtr), notAfterTag);
+        notBefore = _parseProfileTimestamp(der.bytesAt(notBeforePtr), notBeforeTag);
+        notAfter = _parseProfileTimestamp(der.bytesAt(notAfterPtr), notAfterTag);
     }
 
     /// @dev Parses X.509 time bytes with strict RFC 5280 validation
@@ -1196,6 +1402,14 @@ library LibX509 {
         return _parseTimeComponents(x509Time, tag);
     }
 
+    /// @dev RFC 5280's Time choice uses UTCTime through 2049 and
+    ///      GeneralizedTime from 2050 onward. GeneralizedTime-only extension
+    ///      types, such as invalidityDate, deliberately do not use this helper.
+    function _parseProfileTimestamp(bytes memory x509Time, uint8 tag) private pure returns (uint256 timestamp) {
+        timestamp = _parseTimestamp(x509Time, tag);
+        if (tag == 0x18 && timestamp < 2524608000) revert InvalidTimeFormat(); // 2050-01-01T00:00:00Z
+    }
+
     /// @dev Helper function to parse time components (separated to avoid stack too deep)
     function _parseTimeComponents(bytes memory x509Time, uint8 tag) private pure returns (uint256) {
         uint16 yrs;
@@ -1220,9 +1434,8 @@ library LibX509 {
         uint8 mins = (uint8(x509Time[offset + 6]) - 48) * 10 + uint8(x509Time[offset + 7]) - 48;
         uint8 secs = (uint8(x509Time[offset + 8]) - 48) * 10 + uint8(x509Time[offset + 9]) - 48;
 
-        // Validate component ranges per RFC 5280
-        // Month: 01-12, Day: 01-31, Hour: 00-23, Minute: 00-59, Second: 00-59
-        if (mnths == 0 || mnths > 12 || dys == 0 || dys > 31 || hrs > 23 || mins > 59 || secs > 59) {
+        // Validate the real calendar date too (for example, reject February 30).
+        if (!DateTimeLib.isSupportedDateTime(yrs, mnths, dys, hrs, mins, secs)) {
             revert InvalidTimeFormat();
         }
 
