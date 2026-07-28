@@ -45,6 +45,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
 
     bytes32 private constant ISSUER_IDENTITY_V1 = keccak256("AUTOMATA_ISSUER_IDENTITY_V1");
     bytes32 private constant REVOCATION_SCOPE_V2 = keccak256("AUTOMATA_REVOCATION_SCOPE_V2");
+    bytes32 internal constant REVOKED_SET_DOMAIN = keccak256("AUTOMATA_CRL_REVOKED_SET_V1");
 
     /// @notice Address of the P-256 (secp256r1) signature verifier for ECDSA certificate verification
     /// @dev If the chain supports the RIP-7212 secp256r1 precompile (address 0x100), this can be set
@@ -64,12 +65,9 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     ///      preventing certificate substitution attacks across different CA hierarchies.
     mapping(bytes32 bindingHash => bytes32 rootCAHash) public cachedIntermediates;
 
-    /// @notice Revocation blacklist indexed by authenticated issuer scope and serial number
-    /// @dev Scope binds the issuer's subject DN to its public key. It intentionally does
-    ///      not include a trust root: one CA key can be cross-certified or renewed under
-    ///      multiple trusted roots, while its signed revocation state remains authoritative.
-    ///      Revoked certificates fail verification even if otherwise valid
-    mapping(bytes32 revocationScope => mapping(uint256 serialNumber => bool isRevoked)) public revokedCertificates;
+    mapping(bytes32 revocationScope => bytes32 setHash) public activeRevokedSetHash;
+    mapping(bytes32 setHash => bool isIndexed) internal _indexedRevokedSets;
+    mapping(bytes32 setHash => mapping(uint256 serialNumber => bool isMember)) internal _revokedSerials;
 
     // CRL cache: authenticated revocation scope => CRLData
     mapping(bytes32 revocationScope => CRLData crlData) public crlCache;
@@ -121,6 +119,11 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         emit StrictCRLModeChanged(enabled);
     }
 
+    function revokedCertificates(bytes32 revocationScope, uint256 serialNumber) public view returns (bool) {
+        bytes32 setHash = activeRevokedSetHash[revocationScope];
+        return setHash != bytes32(0) && _revokedSerials[setHash][serialNumber];
+    }
+
     /// @notice Check whether a target certificate is revoked in an authenticated chain
     /// @param certChain Certificates ordered as [target, issuer, ..., trusted root]
     /// @return True if the target is revoked by its authenticated issuer
@@ -147,7 +150,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         uint256 issuerIndex = certLen > 1 ? 1 : 0;
         bytes32 revocationScope = _computeRevocationScope(certChain[issuerIndex]);
         uint256 serialNumber = LibX509.getCertSerialNumber(certChain[0]);
-        return revokedCertificates[revocationScope][serialNumber];
+        return revokedCertificates(revocationScope, serialNumber);
     }
 
     /// @notice Compute the authenticated revocation namespace for an issuer
@@ -254,24 +257,29 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
             }
         }
 
-        // Sync revoked certificates to blacklist
-        for (uint256 i = 0; i < crlInfo.revokedSerials.length; i++) {
-            uint256 serialNumber = crlInfo.revokedSerials[i];
-            if (!revokedCertificates[revocationScope][serialNumber]) {
-                revokedCertificates[revocationScope][serialNumber] = true;
+        bytes32 revokedSetHash = _computeRevokedSetHash(revocationScope, crlInfo.revokedSerials);
+        bool reused = _indexedRevokedSets[revokedSetHash];
+
+        if (!reused) {
+            for (uint256 i = 0; i < crlInfo.revokedSerials.length; i++) {
+                uint256 serialNumber = crlInfo.revokedSerials[i];
+                _revokedSerials[revokedSetHash][serialNumber] = true;
                 emit CertificateRevoked(
-                    revocationScope, crlInfo.issuerDN, authorityKeyId, serialNumber, "Synced from CRL"
+                    revocationScope, crlInfo.issuerDN, authorityKeyId, serialNumber, "Indexed from complete CRL"
                 );
             }
+            _indexedRevokedSets[revokedSetHash] = true;
         }
 
-        // Update cache
+        activeRevokedSetHash[revocationScope] = revokedSetHash;
+
         bytes32 crlHash = keccak256(crl);
         cached.crlHash = crlHash;
         cached.thisUpdate = crlInfo.thisUpdate;
         cached.nextUpdate = crlInfo.nextUpdate;
         latestCRLNumber[revocationScope] = crlInfo.crlNumber;
 
+        emit CRLRevokedSetActivated(revocationScope, revokedSetHash, crlInfo.revokedSerials.length, reused);
         emit CRLUpdated(
             revocationScope, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
         );
@@ -504,6 +512,10 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         return keccak256(abi.encode(REVOCATION_SCOPE_V2, _computeIssuerIdentity(issuerCert)));
     }
 
+    function _computeRevokedSetHash(bytes32 revocationScope, uint256[] memory serials) internal pure returns (bytes32) {
+        return keccak256(abi.encode(REVOKED_SET_DOMAIN, revocationScope, serials));
+    }
+
     /// @dev Verify individual certificate validity and CA/leaf constraints.
     function _verifyCertificateConstraints(bytes calldata cert, bool isLeaf, uint256 pathLen) internal view {
         LibX509.validateCertificateExtensions(cert);
@@ -514,7 +526,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     /// @dev Reject a certificate serial revoked by its authenticated issuer scope.
     function _requireCertificateNotRevoked(bytes calldata cert, bytes32 revocationScope) internal view {
         uint256 serialNumber = LibX509.getCertSerialNumber(cert);
-        require(!revokedCertificates[revocationScope][serialNumber], CertificateAlreadyRevoked());
+        require(!revokedCertificates(revocationScope, serialNumber), CertificateAlreadyRevoked());
     }
 
     /// @dev Cache newly verified intermediate certificates

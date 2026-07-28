@@ -30,6 +30,9 @@ interface ICertChainRegistry {
         uint256 thisUpdate,
         uint256 nextUpdate
     );
+    event CRLRevokedSetActivated(
+        bytes32 indexed revocationScope, bytes32 indexed revokedSetHash, uint256 revokedCertificateCount, bool reused
+    );
     event StrictCRLModeChanged(bool enabled);
 
     /// @notice Returns the address of the P256 Verifier that the contract uses
@@ -69,6 +72,10 @@ interface ICertChainRegistry {
     ///      CRLNumber is required and must strictly increase for the authenticated issuer scope.
     ///      In strict CRL mode, current CRLs must already exist for the signer's issuing CAs.
     function updateCRL(bytes calldata crl, bytes[] calldata signerChain) external;
+
+    function activeRevokedSetHash(bytes32 revocationScope) external view returns (bytes32);
+
+    function revokedCertificates(bytes32 revocationScope, uint256 serialNumber) external view returns (bool);
 
     /// @notice Latest accepted CRLNumber for an authenticated issuer identity
     function latestCRLNumber(bytes32 revocationScope) external view returns (uint256);

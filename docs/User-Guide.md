@@ -303,13 +303,14 @@ This function:
 - Validates every revoked entry's serial number, revocation date, and extensions.
   Unknown critical entry extensions and indirect `certificateIssuer` entries are
   rejected
-- Supports permanent revocation entries only. `certificateHold`,
-  `holdInstructionCode`, and `removeFromCRL` are rejected because the on-chain
-  blacklist is append-only and cannot safely represent temporary revocation
+- Supports permanent revocation entries only. The current parser rejects
+  `certificateHold`, `holdInstructionCode`, and `removeFromCRL`; temporary
+  revocation semantics are not supported yet
 - In strict CRL mode, requires current CRLs for every issuing CA above a
   subordinate signer (upload the root CRL first)
 - Retains a non-decreasing `thisUpdate` check as a second anti-rollback guard
-- Syncs revoked certificates to the blacklist
+- Treats the latest authenticated complete CRL as the issuer's current snapshot.
+  Serials omitted from a newer complete CRL become active again
 
 Any address may call this function and relay a CRL. Authorization comes from
 the validated signer chain and CRL signature, not from `msg.sender`.
@@ -323,6 +324,19 @@ The latest accepted number is available under the same issuer-identity key:
 ```solidity
 uint256 number = tpmAttestation.latestCRLNumber(scope);
 ```
+
+Each accepted CRL activates a domain-separated hash of its issuer scope and
+ordered revoked-serial set. `activeRevokedSetHash(scope)` exposes the current
+snapshot identity, while the ABI-compatible
+`revokedCertificates(scope, serialNumber)` query reads membership only from
+that active set. Both queries are O(1).
+
+`CRLRevokedSetActivated` is the snapshot boundary for indexers. Historical
+unique sets remain stored but inactive, so an identical later set can reuse its
+existing index. A unique changed set costs O(n) storage writes for its revoked
+serials; activating an identical set reuses those writes. The owner has no
+setter that can clear individual serials: state changes only when a validated,
+newer complete CRL activates another set.
 
 **Examples:**
 

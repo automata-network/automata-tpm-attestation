@@ -27,6 +27,7 @@ import {
     CRLSignerNotTrusted,
     CRLRequiredInStrictMode,
     CRLExpiredInStrictMode,
+    CRLSignatureVerificationFailed,
     Asn1InvalidLengthBytes,
     InvalidCertChainLength,
     InvalidCertificateChain,
@@ -50,7 +51,21 @@ contract MockCertChainRegistry is CertChainRegistry {
     }
 
     function exposedSetRevoked(bytes32 revocationScope, uint256 serialNumber, bool revoked) external {
-        revokedCertificates[revocationScope][serialNumber] = revoked;
+        uint256[] memory serials = new uint256[](revoked ? 1 : 0);
+        if (revoked) {
+            serials[0] = serialNumber;
+        }
+
+        bytes32 setHash = _computeRevokedSetHash(revocationScope, serials);
+        if (revoked) {
+            _revokedSerials[setHash][serialNumber] = true;
+        }
+        _indexedRevokedSets[setHash] = true;
+        activeRevokedSetHash[revocationScope] = setHash;
+    }
+
+    function exposedComputeRevokedSetHash(bytes32 scope, uint256[] memory serials) external pure returns (bytes32) {
+        return _computeRevokedSetHash(scope, serials);
     }
 
     function exposedGetPubkey(bytes calldata cert) external pure returns (CertPubkey memory) {
@@ -343,6 +358,10 @@ contract CertChainRegistry_DNAndAKIDVerification_Test is CertChainRegistry_Test 
 contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
     // Helper to load CRL from JSON
 
+    function _expectedRevokedSetHash(bytes32 scope, uint256[] memory serials) internal pure returns (bytes32) {
+        return keccak256(abi.encode(keccak256("AUTOMATA_CRL_REVOKED_SET_V1"), scope, serials));
+    }
+
     function _loadRevokedCRL() internal view returns (bytes memory) {
         bytes[] memory crls = _loadCertificate("test_crls_with_revoked");
         require(crls.length == 1, "Need 1 CRL");
@@ -574,6 +593,110 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         assertEq(thisUpdate, crlInfo.thisUpdate, "thisUpdate should match");
         assertEq(nextUpdate, crlInfo.nextUpdate, "nextUpdate should match");
         assertEq(registry.latestCRLNumber(revocationScope), 5, "Latest CRL number should be cached");
+    }
+
+    function test_updateCRL_newCompleteSnapshotRestoresOmittedSerial() public {
+        vm.warp(1785283200); // 2026-07-29 00:00:00 UTC
+
+        bytes[] memory chain = _loadCertificate("snapshot_chain");
+        bytes[] memory crls = _loadCertificate("snapshot_crls");
+        require(chain.length == 2 && crls.length == 5, "Need snapshot fixtures");
+
+        bytes memory root = chain[1];
+        registry.addCA(root);
+        registry.verifyCertChain(chain);
+
+        registry.updateCRL(crls[0], _singletonChain(root));
+        assertTrue(registry.isCertificateRevokedInChain(chain), "CRL #1 must revoke the leaf");
+
+        registry.updateCRL(crls[1], _singletonChain(root));
+        assertFalse(registry.isCertificateRevokedInChain(chain), "New complete CRL must restore an omitted serial");
+        CertPubkey memory restored = registry.verifyCertChain(chain);
+        assertTrue(restored.data.length > 0, "Restored chain must verify");
+    }
+
+    function test_updateCRL_completeSnapshotsActivateExpectedSetsAndReuseHistory() public {
+        vm.warp(1785283200);
+
+        bytes[] memory chain = _loadCertificate("snapshot_chain");
+        bytes[] memory crls = _loadCertificate("snapshot_crls");
+        bytes memory root = chain[1];
+        registry.addCA(root);
+
+        bytes32 scope = registry.computeRevocationScope(keccak256(root), root);
+        uint256[] memory revokedSerials = new uint256[](1);
+        revokedSerials[0] = 0x1001;
+        uint256[] memory emptySerials = new uint256[](0);
+        bytes32 firstSetHash = _expectedRevokedSetHash(scope, revokedSerials);
+        bytes32 emptySetHash = _expectedRevokedSetHash(scope, emptySerials);
+
+        registry.updateCRL(crls[0], _singletonChain(root));
+        assertEq(registry.activeRevokedSetHash(scope), firstSetHash, "CRL #1 must activate its exact set");
+
+        registry.updateCRL(crls[1], _singletonChain(root));
+        assertNotEq(emptySetHash, bytes32(0), "An authenticated empty set needs a non-zero identity");
+        assertNotEq(emptySetHash, firstSetHash, "Empty and one-serial sets must differ");
+        assertEq(registry.activeRevokedSetHash(scope), emptySetHash, "CRL #2 must activate the empty set");
+
+        vm.expectEmit(true, true, false, true);
+        emit ICertChainRegistry.CRLRevokedSetActivated(scope, firstSetHash, 1, true);
+        registry.updateCRL(crls[2], _singletonChain(root));
+        assertEq(registry.activeRevokedSetHash(scope), firstSetHash, "CRL #3 must reactivate CRL #1's set");
+    }
+
+    function test_computeRevokedSetHash_sameSerialsDifferentScopes_areIsolated() public view {
+        uint256[] memory serials = new uint256[](1);
+        serials[0] = 0x1001;
+
+        bytes32 first =
+            MockCertChainRegistry(address(registry)).exposedComputeRevokedSetHash(bytes32(uint256(1)), serials);
+        bytes32 second =
+            MockCertChainRegistry(address(registry)).exposedComputeRevokedSetHash(bytes32(uint256(2)), serials);
+
+        assertNotEq(first, second, "Identical serials under different issuer scopes must not share a set");
+    }
+
+    function test_revokedCertificates_legacySelectorReadsOnlyActiveSet() public {
+        vm.warp(1785283200);
+
+        bytes[] memory chain = _loadCertificate("snapshot_chain");
+        bytes[] memory crls = _loadCertificate("snapshot_crls");
+        bytes memory root = chain[1];
+        registry.addCA(root);
+        bytes32 scope = registry.computeRevocationScope(keccak256(root), root);
+        bytes4 selector = bytes4(keccak256("revokedCertificates(bytes32,uint256)"));
+
+        registry.updateCRL(crls[0], _singletonChain(root));
+        (bool firstCallSucceeded, bytes memory firstResult) =
+            address(registry).staticcall(abi.encodeWithSelector(selector, scope, uint256(0x1001)));
+        assertTrue(firstCallSucceeded, "Legacy getter selector must remain callable");
+        assertTrue(abi.decode(firstResult, (bool)), "CRL #1's active set must contain the leaf");
+
+        registry.updateCRL(crls[1], _singletonChain(root));
+        (bool secondCallSucceeded, bytes memory secondResult) =
+            address(registry).staticcall(abi.encodeWithSelector(selector, scope, uint256(0x1001)));
+        assertTrue(secondCallSucceeded, "Legacy getter selector must remain callable after replacement");
+        assertFalse(abi.decode(secondResult, (bool)), "CRL #2's active empty set must omit the leaf");
+    }
+
+    function test_updateCRL_badSignature_keepsActiveSetHash() public {
+        vm.warp(1785283200);
+
+        bytes[] memory chain = _loadCertificate("snapshot_chain");
+        bytes[] memory crls = _loadCertificate("snapshot_crls");
+        bytes memory root = chain[1];
+        registry.addCA(root);
+        bytes32 scope = registry.computeRevocationScope(keccak256(root), root);
+
+        registry.updateCRL(crls[0], _singletonChain(root));
+        bytes32 activeSetHash = registry.activeRevokedSetHash(scope);
+
+        bytes memory badSignature = abi.encodePacked(crls[1]);
+        badSignature[badSignature.length - 1] ^= 0x01;
+        vm.expectRevert(CRLSignatureVerificationFailed.selector);
+        registry.updateCRL(badSignature, _singletonChain(root));
+
+        assertEq(registry.activeRevokedSetHash(scope), activeSetHash, "Rejected signature must not activate a set");
     }
 
     function test_parseCRL_missingNumber_reverts() public {
@@ -1231,11 +1354,15 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         // First update with newer CRL
         bytes memory revokedCrl = _loadRevokedCRL();
         registry.updateCRL(revokedCrl, _singletonChain(caCert));
+        bytes32 scope = registry.computeRevocationScope(keccak256(caCert), caCert);
+        bytes32 activeSetHash = registry.activeRevokedSetHash(scope);
 
         // Try to rollback to older CRL (should revert)
         bytes memory emptyCrl = _loadEmptyCRL();
         vm.expectRevert(CRLRollbackAttempt.selector);
         registry.updateCRL(emptyCrl, _singletonChain(caCert));
+
+        assertEq(registry.activeRevokedSetHash(scope), activeSetHash, "Rollback must not activate a set");
     }
 
     function test_updateCRL_higherNumberOlderThisUpdate_reverts() public {
@@ -1263,6 +1390,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes32 scope = registry.computeRevocationScope(keccak256(caCert), caCert);
         (bytes32 cachedHash, uint256 cachedThisUpdate, uint256 cachedNextUpdate) = registry.crlCache(scope);
         uint256 cachedNumber = registry.latestCRLNumber(scope);
+        bytes32 activeSetHash = registry.activeRevokedSetHash(scope);
 
         vm.expectRevert(CRLRollbackAttempt.selector);
         registry.updateCRL(crls[1], _singletonChain(caCert));
@@ -1272,6 +1400,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         assertEq(finalThisUpdate, cachedThisUpdate, "Rejected CRL must not change thisUpdate");
         assertEq(finalNextUpdate, cachedNextUpdate, "Rejected CRL must not change nextUpdate");
         assertEq(registry.latestCRLNumber(scope), cachedNumber, "Rejected CRL must not change latest number");
+        assertEq(registry.activeRevokedSetHash(scope), activeSetHash, "Rejected CRL must not activate a set");
         assertEq(cachedNumber, 10, "Baseline CRL number must remain current");
     }
 
@@ -1389,8 +1518,8 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         assertEq(nextUpdate, crlInfo.nextUpdate, "nextUpdate should match");
     }
 
-    /// @notice Test updateCRL syncs revoked certificates to blacklist
-    function test_updateCRL_syncsRevokedToBlacklist_succeeds() public {
+    /// @notice Test updateCRL indexes revoked certificates in the active set
+    function test_updateCRL_indexesRevokedInActiveSet_succeeds() public {
         // Warp to a time within CRL validity (Nov 23 2025 - Nov 21 2035)
         vm.warp(1764979200); // Dec 6 2025 00:00:00 UTC
 
@@ -1411,10 +1540,10 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         // Verify certificate is not revoked before CRL update
         assertFalse(registry.isCertificateRevokedInChain(chain), "Certificate should not be revoked yet");
 
-        // Update CRL - this should sync revocations to blacklist
+        // Update CRL - this should activate the revoked set
         registry.updateCRL(crlBytes, _singletonChain(caCert));
 
-        // Verify certificate is now revoked in blacklist
+        // Verify certificate is now revoked in the active set
         assertTrue(registry.isCertificateRevokedInChain(chain), "Certificate should be revoked after CRL sync");
 
         // Verify that verifyCertChain will fail for revoked certificate
@@ -1713,13 +1842,13 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         // Update CRL
         registry.updateCRL(crlBytes, _singletonChain(caCert));
 
-        // Verify all revoked serials are synced to blacklist
+        // Verify all revoked serials are indexed in the active set
         bytes32 revocationScope = registry.computeRevocationScope(keccak256(caCert), caCert);
 
-        // Check that all revoked serials from CRL are now in blacklist
+        // Check that all revoked serials from the CRL are active
         for (uint256 i = 0; i < crlInfo.revokedSerials.length; i++) {
             uint256 serial = crlInfo.revokedSerials[i];
-            assertTrue(registry.revokedCertificates(revocationScope, serial), "Revoked serial should be in blacklist");
+            assertTrue(registry.revokedCertificates(revocationScope, serial), "Revoked serial should be active");
         }
     }
 
