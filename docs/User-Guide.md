@@ -263,12 +263,36 @@ Verify a certificate's signature using the issuer's public key (supports RSA and
 
 ### CRL (Certificate Revocation List) Management
 
-#### `updateCRL(bytes crl, bytes issuerCert)`
+#### `updateCRL(bytes crl, bytes[] signerChain)`
 
-Update the Certificate Revocation List for a specific issuer. This function:
-- Verifies CRL validity period
-- Verifies CRL signature against issuer's public key
-- Validates issuer DN and AKID match
+Update the Certificate Revocation List for a specific issuer. `signerChain` must
+contain the complete CRL signer path in this order:
+
+```text
+[CRL signer, parent CA, ..., trusted root CA]
+```
+
+The final root certificate must already be registered in `verifiedCA`. When the
+CRL signer is itself a trusted root, pass a one-element array containing that
+root. When an intermediate CA signs the CRL, provide the intermediate and its
+complete chain through the trusted root.
+
+Only direct, complete CRLs are supported. The first certificate must itself be
+the issuing CA and must authorize both certificate signing and CRL signing;
+delegated indirect CRL signers, delta CRLs, and partitioned CRLs are not
+supported.
+
+This function:
+
+- Verifies every non-root certificate signature against its parent CA
+- Verifies every certificate's validity period and applicable CA constraints
+- Requires the CRL signer certificate to authorize `cRLSign` key usage
+- Verifies the CRL validity period and signature against the first certificate
+  in `signerChain`
+- Validates the CRL issuer DN and AKID against the signer certificate
+- Requires the final root certificate to be present in `verifiedCA`
+- In strict CRL mode, requires current CRLs for every issuing CA above a
+  subordinate signer (upload the root CRL first)
 - Accepts only direct, complete CRLs; delta, partitioned, and indirect CRLs are
   rejected
 - Requires one unique, non-critical CRL Number extension and rejects malformed,
@@ -286,8 +310,26 @@ Update the Certificate Revocation List for a specific issuer. This function:
 - Performs anti-rollback checks
 - Syncs revoked certificates to the blacklist
 
+Any address may call this function and relay a CRL. Authorization comes from
+the validated signer chain and CRL signature, not from `msg.sender`.
+
 ```solidity
-function updateCRL(bytes calldata crl, bytes calldata issuerCert) external;
+function updateCRL(bytes calldata crl, bytes[] calldata signerChain) external;
+```
+
+**Examples:**
+
+```solidity
+// A trusted root signs its own CRL.
+bytes[] memory rootSignerChain = new bytes[](1);
+rootSignerChain[0] = rootCaCert;
+tpmAttestation.updateCRL(rootCrl, rootSignerChain);
+
+// An intermediate signs a CRL for certificates it issued.
+bytes[] memory intermediateSignerChain = new bytes[](2);
+intermediateSignerChain[0] = intermediateCaCert;
+intermediateSignerChain[1] = rootCaCert;
+tpmAttestation.updateCRL(intermediateCrl, intermediateSignerChain);
 ```
 
 #### `isCertificateRevoked(bytes cert)`

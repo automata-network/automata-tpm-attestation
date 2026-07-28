@@ -12,6 +12,7 @@ import {ICertChainRegistry} from "src/interfaces/ICertChainRegistry.sol";
 import {LibX509, CertPubkey, CRLInfo} from "src/lib/LibX509.sol";
 import {LibX509Verify} from "src/lib/LibX509Verify.sol";
 import {
+    CertificateExpired,
     CertificateAlreadyRevoked,
     CRLIssuerMismatch,
     CRLMissingNumber,
@@ -22,15 +23,39 @@ import {
     TemporaryRevocationNotSupported,
     InvalidTimeFormat,
     CRLRollbackAttempt,
+    CRLSignNotSet,
+    CRLSignerNotTrusted,
     CRLRequiredInStrictMode,
     CRLExpiredInStrictMode,
     UnsupportedCriticalCertificateExtension,
     Asn1InvalidLengthBytes,
+    InvalidCertChainLength,
+    InvalidCertificateChain,
+    IssuerSubjectDNMismatch,
+    CertChainAKIDMismatch,
+    InvalidSignature,
+    PathLenConstraintViolated,
     ZeroAddress
 } from "src/types/Errors.sol";
 
 contract MockCertChainRegistry is CertChainRegistry {
     constructor(address _owner) CertChainRegistry(_owner, LibX509Verify.P256_VERIFIER) {}
+
+    function exposedVerifyCRLSignerChain(bytes[] calldata signerChain) external view {
+        _verifyCRLSignerChain(signerChain);
+    }
+
+    function exposedSetVerifiedCA(bytes calldata ca, bool trusted) external {
+        verifiedCA[keccak256(ca)] = trusted;
+    }
+
+    function exposedSetRevoked(bytes32 revocationScope, uint256 serialNumber, bool revoked) external {
+        revokedCertificates[revocationScope][serialNumber] = revoked;
+    }
+
+    function exposedGetPubkey(bytes calldata cert) external pure returns (CertPubkey memory) {
+        return LibX509.getPubkey(cert);
+    }
 }
 
 /// @title CertChainRegistry_Test
@@ -78,6 +103,11 @@ contract CertChainRegistry_Test is Test {
         bytes[] memory crls = _loadCertificate("test_crls_empty");
         require(crls.length == 1, "Need 1 CRL");
         return crls[0];
+    }
+
+    function _singletonChain(bytes memory cert) internal pure returns (bytes[] memory chain) {
+        chain = new bytes[](1);
+        chain[0] = cert;
     }
 }
 
@@ -788,7 +818,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // Update CRL
         bytes memory crlBytes = _loadEmptyCRL();
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _singletonChain(caCert));
 
         // Verify CRL was cached
         CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
@@ -800,6 +830,319 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         assertEq(crlHash, keccak256(crlBytes), "CRL hash should match");
         assertEq(thisUpdate, crlInfo.thisUpdate, "thisUpdate should match");
         assertEq(nextUpdate, crlInfo.nextUpdate, "nextUpdate should match");
+    }
+
+    /// @notice An otherwise valid CRL must not authorize its own untrusted signer certificate
+    function test_updateCRL_untrustedSigner_reverts() public {
+        vm.warp(1764979200);
+
+        bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
+        bytes memory caCert = certs[1];
+
+        assertFalse(registry.verifiedCA(keccak256(caCert)));
+        vm.expectRevert(CRLSignerNotTrusted.selector);
+        registry.updateCRL(_loadEmptyCRL(), _singletonChain(caCert));
+    }
+
+    function test_verifyCRLSignerChain_empty_reverts() public {
+        bytes[] memory signerChain = new bytes[](0);
+
+        vm.expectRevert(InvalidCertChainLength.selector);
+        MockCertChainRegistry(address(registry)).exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    function test_verifyCRLSignerChain_tooLong_reverts() public {
+        bytes[] memory signerChain = new bytes[](5);
+
+        vm.expectRevert(InvalidCertChainLength.selector);
+        MockCertChainRegistry(address(registry)).exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    function test_verifyCRLSignerChain_duplicateCert_reverts() public {
+        bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
+        bytes memory root = certs[1];
+        registry.addCA(root);
+
+        bytes[] memory signerChain = new bytes[](2);
+        signerChain[0] = root;
+        signerChain[1] = root;
+
+        vm.expectRevert(InvalidCertificateChain.selector);
+        MockCertChainRegistry(address(registry)).exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    function test_verifyCRLSignerChain_missingCRLSign_reverts() public {
+        bytes[] memory certs = _loadCertificate("gcp_snp_vek_certs");
+        require(certs.length == 3, "Need 3 certs");
+
+        (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(certs[1]);
+        assertTrue(keyUsageExists, "Signer fixture must have key usage");
+        assertEq(keyUsage & 0x0200, 0, "Signer fixture must omit cRLSign");
+
+        // This fixture's root uses an unsupported RSA-PSS self-signature. Isolate
+        // the cRLSign rule by setting only the trust-anchor precondition in the mock.
+        MockCertChainRegistry mock = MockCertChainRegistry(address(registry));
+        mock.exposedSetVerifiedCA(certs[2], true);
+
+        bytes[] memory signerChain = new bytes[](2);
+        signerChain[0] = certs[1];
+        signerChain[1] = certs[2];
+
+        vm.expectRevert(CRLSignNotSet.selector);
+        mock.exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    /// @dev Catches removal of _requireCertificateNotRevoked from the signer-chain constraint loop.
+    function test_verifyCRLSignerChain_revokedSigner_reverts() public {
+        bytes[] memory certs = _loadCertificate("gcp_tdx_tpm_certs");
+        require(certs.length == 3, "Need leaf, intermediate and root");
+
+        bytes memory signerIssuerDN = LibX509.getCertIssuerDN(certs[1]);
+        (bool akidExists, bytes memory signerAKID) = LibX509.getAuthorityKeyIdentifier(certs[1]);
+        assertTrue(akidExists && signerAKID.length > 0, "Signer fixture must identify its issuer");
+        bytes32 revocationScope = keccak256(abi.encode(signerIssuerDN, signerAKID));
+        uint256 signerSerial = LibX509.getCertSerialNumber(certs[1]);
+        (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(certs[1]);
+        assertTrue(keyUsageExists && (keyUsage & 0x0200) != 0, "Signer fixture must carry cRLSign");
+        assertFalse(registry.revokedCertificates(revocationScope, signerSerial), "Signer must start unrevoked");
+
+        registry.addCA(certs[2]);
+        MockCertChainRegistry mock = MockCertChainRegistry(address(registry));
+        mock.exposedSetRevoked(revocationScope, signerSerial, true);
+        assertTrue(registry.revokedCertificates(revocationScope, signerSerial), "Signer must be revoked in root scope");
+
+        bytes[] memory signerChain = new bytes[](2);
+        signerChain[0] = certs[1];
+        signerChain[1] = certs[2];
+
+        vm.expectRevert(CertificateAlreadyRevoked.selector);
+        mock.exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    /// @dev Catches removal of the issuer-DN to parent-subject-DN linkage check.
+    function test_verifyCRLSignerChain_dnMismatch_reverts() public {
+        bytes[] memory gcpCerts = _loadCertificate("gcp_tdx_tpm_certs");
+        bytes[] memory selfSignedCerts = _loadCertificate("self_signed_ec_ca");
+        require(gcpCerts.length == 3 && selfSignedCerts.length == 2, "Need signer and root fixtures");
+
+        bytes memory signer = gcpCerts[1];
+        bytes memory root = selfSignedCerts[1];
+        (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(signer);
+        assertTrue(keyUsageExists && (keyUsage & 0x0200) != 0, "Signer fixture must carry cRLSign");
+        assertNotEq(
+            keccak256(LibX509.getCertIssuerDN(signer)),
+            keccak256(LibX509.getCertSubjectDN(root)),
+            "Fixture must reach the DN-mismatch branch"
+        );
+
+        registry.addCA(root);
+        bytes[] memory signerChain = new bytes[](2);
+        signerChain[0] = signer;
+        signerChain[1] = root;
+
+        vm.expectRevert(IssuerSubjectDNMismatch.selector);
+        MockCertChainRegistry(address(registry)).exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    /// @dev Catches removal of the signer AKID to issuer SKID linkage check.
+    function test_verifyCRLSignerChain_akidSkidMismatch_reverts() public {
+        bytes[] memory certs = _loadCertificate("gcp_tdx_tpm_certs");
+        require(certs.length == 3, "Need leaf, intermediate and root");
+
+        bytes memory signer = certs[1];
+        bytes memory root = abi.encodePacked(certs[2]);
+        (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(signer);
+        (bool akidExists, bytes memory akid) = LibX509.getAuthorityKeyIdentifier(signer);
+        (bool skidExists, bytes memory skid) = LibX509.getSubjectKeyIdentifier(root);
+        assertTrue(keyUsageExists && (keyUsage & 0x0200) != 0, "Signer fixture must carry cRLSign");
+        assertEq(
+            keccak256(LibX509.getCertIssuerDN(signer)),
+            keccak256(LibX509.getCertSubjectDN(root)),
+            "Fixture must pass DN linkage"
+        );
+        assertTrue(akidExists && akid.length > 0 && skidExists && skid.length > 0, "Fixture must carry AKID and SKID");
+        assertEq(keccak256(akid), keccak256(skid), "Original fixture must pass AKID/SKID linkage");
+
+        uint256 skidOffset = type(uint256).max;
+        for (uint256 i; i + skid.length <= root.length; i++) {
+            bool matches = true;
+            for (uint256 j; j < skid.length; j++) {
+                if (root[i + j] != skid[j]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                skidOffset = i;
+                break;
+            }
+        }
+        require(skidOffset != type(uint256).max, "SKID bytes must occur in root DER");
+        root[skidOffset + skid.length - 1] ^= 0x01;
+
+        (bool mutatedSkidExists, bytes memory mutatedSkid) = LibX509.getSubjectKeyIdentifier(root);
+        assertTrue(mutatedSkidExists, "Mutated root must retain SKID");
+        assertEq(
+            keccak256(LibX509.getCertIssuerDN(signer)),
+            keccak256(LibX509.getCertSubjectDN(root)),
+            "SKID mutation must preserve DN linkage"
+        );
+        assertNotEq(keccak256(akid), keccak256(mutatedSkid), "Fixture must reach the AKID/SKID-mismatch branch");
+
+        MockCertChainRegistry mock = MockCertChainRegistry(address(registry));
+        mock.exposedSetVerifiedCA(root, true);
+        bytes[] memory signerChain = new bytes[](2);
+        signerChain[0] = signer;
+        signerChain[1] = root;
+
+        vm.expectRevert(abi.encodeWithSelector(CertChainAKIDMismatch.selector, uint256(0), akid, mutatedSkid));
+        mock.exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    /// @dev Catches removal of the cryptographic child-certificate signature verification.
+    function test_verifyCRLSignerChain_invalidChildSignature_reverts() public {
+        bytes[] memory certs = _loadCertificate("gcp_tdx_tpm_certs");
+        require(certs.length == 3, "Need leaf, intermediate and root");
+
+        bytes memory signer = abi.encodePacked(certs[1]);
+        bytes memory root = certs[2];
+        (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(signer);
+        assertTrue(keyUsageExists && (keyUsage & 0x0200) != 0, "Signer fixture must carry cRLSign");
+        assertEq(
+            keccak256(LibX509.getCertIssuerDN(signer)),
+            keccak256(LibX509.getCertSubjectDN(root)),
+            "Original fixture must pass DN linkage"
+        );
+        assertTrue(
+            registry.verifyCertSignature(signer, MockCertChainRegistry(address(registry)).exposedGetPubkey(root)),
+            "Original fixture signature must be valid"
+        );
+
+        signer[signer.length - 1] ^= 0x01;
+        assertNotEq(keccak256(signer), keccak256(certs[1]), "Mutation must change the signer certificate");
+
+        registry.addCA(root);
+        bytes[] memory signerChain = new bytes[](2);
+        signerChain[0] = signer;
+        signerChain[1] = root;
+
+        vm.expectRevert(InvalidSignature.selector);
+        MockCertChainRegistry(address(registry)).exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    /// @dev Catches removal of pathLenConstraint enforcement before signer-path linkage validation.
+    function test_verifyCRLSignerChain_pathLenConstraint_reverts() public {
+        vm.warp(1785196800);
+
+        bytes[] memory tdxCerts = _loadCertificate("gcp_tdx_tpm_certs");
+        bytes[] memory vekCerts = _loadCertificate("gcp_snp_vek_certs");
+        require(tdxCerts.length == 3 && vekCerts.length == 3, "Need two three-level chains");
+
+        bytes[] memory signerChain = new bytes[](3);
+        signerChain[0] = tdxCerts[1];
+        signerChain[1] = tdxCerts[2];
+        signerChain[2] = vekCerts[1];
+
+        (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(signerChain[0]);
+        (bool basicConstraintsExists, bool isCA, bool hasPathLen, uint256 pathLen) =
+            LibX509.getBasicConstraints(signerChain[2]);
+        assertTrue(keyUsageExists && (keyUsage & 0x0200) != 0, "Signer fixture must carry cRLSign");
+        assertTrue(basicConstraintsExists && isCA && hasPathLen, "Final fixture must be a path-length-constrained CA");
+        assertEq(pathLen, 0, "Final fixture must have pathLen zero");
+        assertNotEq(keccak256(signerChain[0]), keccak256(signerChain[1]), "Signer and parent must differ");
+        assertNotEq(keccak256(signerChain[1]), keccak256(signerChain[2]), "Parent and final CA must differ");
+
+        // This deliberately does not form a name-valid path: it isolates that
+        // constraints are checked before DN, AKID/SKID, and signature linkage.
+        MockCertChainRegistry mock = MockCertChainRegistry(address(registry));
+        mock.exposedSetVerifiedCA(signerChain[2], true);
+
+        vm.expectRevert(PathLenConstraintViolated.selector);
+        mock.exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    function test_verifyCRLSignerChain_intermediateToTrustedRoot_succeeds() public {
+        bytes[] memory certs = _loadCertificate("gcp_tdx_tpm_certs");
+        require(certs.length == 3, "Need 3 certs");
+
+        registry.addCA(certs[2]);
+
+        bytes[] memory signerChain = new bytes[](2);
+        signerChain[0] = certs[1]; // CRL signer (intermediate)
+        signerChain[1] = certs[2]; // Trusted root
+
+        MockCertChainRegistry(address(registry)).exposedVerifyCRLSignerChain(signerChain);
+    }
+
+    function test_updateCRL_expiredSignerRoot_reverts() public {
+        vm.warp(1764979200);
+
+        bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
+        bytes memory caCert = certs[1];
+        bytes memory crlBytes = _loadEmptyCRL();
+        registry.addCA(caCert);
+
+        // The signer/root expires on Oct 26 2035 while this CRL remains valid until Dec 3 2035.
+        vm.warp(2077500000); // Nov 1 2035 03:20:00 UTC
+        (, uint256 certNotAfter) = LibX509.getCertValidity(caCert);
+        CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
+        assertGt(block.timestamp, certNotAfter, "Signer/root must be expired for this test");
+        assertLt(block.timestamp, crlInfo.nextUpdate, "CRL must still be valid for this test");
+
+        vm.expectRevert(CertificateExpired.selector);
+        registry.updateCRL(crlBytes, _singletonChain(caCert));
+    }
+
+    function test_updateCRL_nonOwnerCanRelayValidRootCRL_succeeds() public {
+        vm.warp(1764979200);
+
+        bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
+        bytes memory caCert = certs[1];
+        bytes memory crlBytes = _loadEmptyCRL();
+        registry.addCA(caCert);
+
+        vm.prank(nonOwner);
+        registry.updateCRL(crlBytes, _singletonChain(caCert));
+
+        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
+        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
+        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        (bytes32 cachedHash,,) = registry.crlCache(issuerHash);
+        assertEq(cachedHash, keccak256(crlBytes));
+    }
+
+    function test_updateCRL_removedRoot_reverts() public {
+        vm.warp(1764979200);
+
+        bytes[] memory certs = _loadCertificate("self_signed_ec_ca");
+        bytes memory root = certs[1];
+        registry.addCA(root);
+        registry.removeCA(root);
+
+        vm.expectRevert(CRLSignerNotTrusted.selector);
+        registry.updateCRL(_loadEmptyCRL(), _singletonChain(root));
+    }
+
+    function test_verifyCRLSignerChain_strictMode_requiresRootCRL() public {
+        vm.warp(1764072000); // Nov 25 2025, within the GCP root CRL validity window
+
+        bytes[] memory certs = _loadCertificate("gcp_tdx_tpm_certs");
+        require(certs.length == 3, "Need 3 certs");
+        registry.addCA(certs[2]);
+        registry.setStrictCRLMode(true);
+
+        bytes[] memory signerChain = new bytes[](2);
+        signerChain[0] = certs[1];
+        signerChain[1] = certs[2];
+
+        vm.expectRevert(CRLRequiredInStrictMode.selector);
+        MockCertChainRegistry(address(registry)).exposedVerifyCRLSignerChain(signerChain);
+
+        bytes[] memory crls = _loadCertificate("gcp_root_ca_crl");
+        require(crls.length == 1, "Need 1 CRL");
+        registry.updateCRL(crls[0], _singletonChain(certs[2]));
+
+        MockCertChainRegistry(address(registry)).exposedVerifyCRLSignerChain(signerChain);
     }
 
     /// @notice Test isSerialRevokedInCRL returns false for non-revoked certificate
@@ -840,13 +1183,16 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         require(certs.length == 2, "Need 2 certs");
 
         bytes memory caCert = certs[1]; // Root CA
-        bytes memory leafCert = certs[0]; // Leaf cert (wrong issuer)
         registry.addCA(caCert);
+
+        bytes[] memory gcpCerts = _loadCertificate("gcp_tdx_tpm_certs");
+        bytes memory wrongIssuer = gcpCerts[2];
+        registry.addCA(wrongIssuer);
 
         // Try to update CRL with wrong issuer cert
         bytes memory crlBytes = _loadEmptyCRL();
         vm.expectRevert(CRLIssuerMismatch.selector);
-        registry.updateCRL(crlBytes, leafCert);
+        registry.updateCRL(crlBytes, _singletonChain(wrongIssuer));
     }
 
     /// @notice Test updateCRL with rollback attempt reverts
@@ -862,12 +1208,12 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // First update with newer CRL
         bytes memory revokedCrl = _loadRevokedCRL();
-        registry.updateCRL(revokedCrl, caCert);
+        registry.updateCRL(revokedCrl, _singletonChain(caCert));
 
         // Try to rollback to older CRL (should revert)
         bytes memory emptyCrl = _loadEmptyCRL();
         vm.expectRevert(CRLRollbackAttempt.selector);
-        registry.updateCRL(emptyCrl, caCert);
+        registry.updateCRL(emptyCrl, _singletonChain(caCert));
     }
 
     /// @notice Test updateCRL emits CRLUpdated event
@@ -893,7 +1239,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
             issuerHash, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
         );
 
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _singletonChain(caCert));
     }
 
     /// @notice Test updateCRL can update to newer CRL
@@ -909,13 +1255,13 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // First update with empty CRL
         bytes memory emptyCrl = _loadEmptyCRL();
-        registry.updateCRL(emptyCrl, caCert);
+        registry.updateCRL(emptyCrl, _singletonChain(caCert));
 
         CRLInfo memory oldCrlInfo = this._parseCRLHelper(emptyCrl);
 
         // Update to newer CRL with revoked cert (has later thisUpdate)
         bytes memory revokedCrl = _loadRevokedCRL();
-        registry.updateCRL(revokedCrl, caCert);
+        registry.updateCRL(revokedCrl, _singletonChain(caCert));
 
         // Verify cache was updated
         CRLInfo memory newCrlInfo = this._parseCRLHelper(revokedCrl);
@@ -973,7 +1319,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes memory gcpCrl = crls[0];
 
         // Update CRL
-        registry.updateCRL(gcpCrl, gcpRootCA);
+        registry.updateCRL(gcpCrl, _singletonChain(gcpRootCA));
 
         // Verify CRL was cached
         CRLInfo memory crlInfo = this._parseCRLHelper(gcpCrl);
@@ -1009,7 +1355,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         assertFalse(registry.isCertificateRevoked(leafCert), "Certificate should not be revoked yet");
 
         // Update CRL - this should sync revocations to blacklist
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _singletonChain(caCert));
 
         // Verify certificate is now revoked in blacklist
         assertTrue(registry.isCertificateRevoked(leafCert), "Certificate should be revoked after CRL sync");
@@ -1039,7 +1385,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
 
         // Update CRL
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _singletonChain(caCert));
 
         // Verify all revoked serials are synced to blacklist
         bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
@@ -1085,7 +1431,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // 4. Upload CRL: succeeds with valid CRL
         bytes memory crlBytes = _loadEmptyCRL();
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _singletonChain(caCert));
         registry.verifyCertChain(certs);
 
         // 5. Warp to future: fails with expired CRL

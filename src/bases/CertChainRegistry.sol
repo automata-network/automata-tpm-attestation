@@ -9,6 +9,7 @@ import {CertPubkey, LibX509, SignatureAlgorithm, CRLInfo} from "../lib/LibX509.s
 import {LibX509Verify} from "../lib/LibX509Verify.sol";
 import {
     InvalidCertChainLength,
+    InvalidCertificateChain,
     InvalidSignature,
     CertNotCa,
     CertificateAlreadyRevoked,
@@ -18,10 +19,13 @@ import {
     CRLIssuerMismatch,
     CRLRollbackAttempt,
     InvalidCRLFormat,
+    CRLSignerNotTrusted,
+    CRLSignNotSet,
     CRLRequiredInStrictMode,
     CRLExpiredInStrictMode,
     CRLMissingAKID,
     IssuerCertMissingSKID,
+    CertChainAKIDMismatch,
     IssuerSubjectDNMismatch,
     RootCaNotAtEndOfChain,
     ZeroAddress
@@ -138,13 +142,21 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
 
     /// @notice Update CRL for a specific issuer
     /// @param crl The DER-encoded CRL
-    /// @param issuerCert The issuer's certificate for signature verification
+    /// @param signerChain The CRL signer chain ordered as [signer, parent(s), trusted root]
     /// @dev The function verifies:
     /// @dev 1. CRL validity period (thisUpdate <= now < nextUpdate)
-    /// @dev 2. CRL signature against issuer's public key
-    /// @dev 3. Issuer DN and AKID match
-    /// @dev 4. Anti-rollback: new CRL's thisUpdate must be >= cached CRL's thisUpdate
-    function updateCRL(bytes calldata crl, bytes calldata issuerCert) public {
+    /// @dev 2. CRL signer chain terminates at a root in verifiedCA
+    /// @dev 3. Every certificate is valid/authorized as a CA, and every non-root is signed by its parent
+    /// @dev 4. The direct signer has the cRLSign key usage
+    /// @dev 5. CRL signature, issuer DN, and AKID match the direct signer
+    /// @dev 6. Anti-rollback: new CRL's thisUpdate must be >= cached CRL's thisUpdate
+    /// @dev In strict CRL mode, the signer path must also have current issuer CRLs.
+    function updateCRL(bytes calldata crl, bytes[] calldata signerChain) public {
+        uint256 signerChainLength = signerChain.length;
+        if (signerChainLength == 0 || signerChainLength > 4) {
+            revert InvalidCertChainLength();
+        }
+
         // Parse CRL
         CRLInfo memory crlInfo = LibX509.parseCRL(crl);
 
@@ -155,6 +167,10 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         if (block.timestamp >= crlInfo.nextUpdate) {
             revert CRLExpired();
         }
+
+        // Authenticate the exact CRL signer back to a currently trusted root.
+        _verifyCRLSignerChain(signerChain);
+        bytes calldata issuerCert = signerChain[0];
 
         bytes32 issuerHash;
         bytes memory akidForHash;
@@ -223,6 +239,70 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         emit CRLUpdated(
             issuerHash, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
         );
+    }
+
+    /// @dev Validate a direct CRL signer certificate path to a trusted root.
+    ///      This contract intentionally supports complete, direct CRLs only: the first
+    ///      certificate must be a CA authorized for both certificate and CRL signing.
+    /// @param signerChain Certificates ordered as [CRL signer, parent(s), trusted root]
+    function _verifyCRLSignerChain(bytes[] calldata signerChain) internal view {
+        uint256 signerChainLength = signerChain.length;
+        if (signerChainLength == 0 || signerChainLength > 4) {
+            revert InvalidCertChainLength();
+        }
+
+        if (!verifiedCA[keccak256(signerChain[signerChainLength - 1])]) {
+            revert CRLSignerNotTrusted();
+        }
+
+        // A root CRL can always refresh itself. For subordinate signers in strict
+        // mode, each issuing CA above the signer must already have a current CRL.
+        if (strictCRLMode) {
+            _checkCRLValidityForChain(signerChain);
+        }
+
+        // A direct CRL signer must explicitly be authorized to sign CRLs.
+        (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(signerChain[0]);
+        uint16 keyUsageCRLSign = 0x0200;
+        if (!keyUsageExists || (keyUsage & keyUsageCRLSign) == 0) {
+            revert CRLSignNotSet();
+        }
+
+        for (uint256 i = 0; i < signerChainLength; i++) {
+            bytes32 certHash = keccak256(signerChain[i]);
+            for (uint256 j = 0; j < i; j++) {
+                if (certHash == keccak256(signerChain[j])) {
+                    revert InvalidCertificateChain();
+                }
+            }
+
+            // The CRL signer is the certification-path target and is not counted
+            // as an intermediate CA for pathLenConstraint purposes.
+            uint256 intermediateCACount = i == 0 ? 0 : i - 1;
+            _verifyCertificateConstraints(signerChain[i], false, intermediateCACount);
+        }
+
+        for (uint256 i = 0; i + 1 < signerChainLength; i++) {
+            bytes memory issuerDN = LibX509.getCertIssuerDN(signerChain[i]);
+            bytes memory parentSubjectDN = LibX509.getCertSubjectDN(signerChain[i + 1]);
+            if (keccak256(issuerDN) != keccak256(parentSubjectDN)) {
+                revert IssuerSubjectDNMismatch();
+            }
+
+            (bool akidExists, bytes memory akid) = LibX509.getAuthorityKeyIdentifier(signerChain[i]);
+            (bool skidExists, bytes memory skid) = LibX509.getSubjectKeyIdentifier(signerChain[i + 1]);
+            if (!skidExists || skid.length == 0) {
+                revert IssuerCertMissingSKID();
+            }
+            if (!akidExists || akid.length == 0 || keccak256(akid) != keccak256(skid)) {
+                revert CertChainAKIDMismatch(i, akid, skid);
+            }
+
+            CertPubkey memory parentPubkey = LibX509.getPubkey(signerChain[i + 1]);
+            if (!verifyCertSignature(signerChain[i], parentPubkey)) {
+                revert InvalidSignature();
+            }
+        }
     }
 
     /// @notice Verifies a certificate's signature using the issuer's public key

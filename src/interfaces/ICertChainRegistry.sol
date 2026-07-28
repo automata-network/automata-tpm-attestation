@@ -47,10 +47,16 @@ interface ICertChainRegistry {
 
     function removeIntermediateCerts(bytes32[] calldata certHashes) external;
 
-    /// @notice Update CRL for a specific issuer
+    /// @notice Update the CRL for a specific issuer
     /// @param crl The DER-encoded CRL
-    /// @param issuerCert The issuer's certificate for signature verification
-    function updateCRL(bytes calldata crl, bytes calldata issuerCert) external;
+    /// @param signerChain The complete certificate path ordered as
+    ///        [CRL signer, parent, ..., trusted root]
+    /// @dev Any caller may relay a CRL. The CRL signer must have cRLSign key usage; every
+    ///      non-root certificate signature and every certificate's validity and CA constraints
+    ///      are checked. The final root must be registered in verifiedCA. A trusted root signer
+    ///      uses a one-element path; an intermediate signer must include its complete path.
+    ///      In strict CRL mode, current CRLs must already exist for the signer's issuing CAs.
+    function updateCRL(bytes calldata crl, bytes[] calldata signerChain) external;
 
     function verifyCertSignature(bytes calldata cert, CertPubkey memory issuer) external view returns (bool);
 

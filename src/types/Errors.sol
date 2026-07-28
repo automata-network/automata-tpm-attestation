@@ -124,6 +124,9 @@ error CRLMissingNumber();
 /// @dev CRLNumber must be unique, non-critical, non-negative, and valid DER
 error InvalidCRLNumber();
 error InvalidCRLFormat();
+error CRLSignerNotTrusted();
+/// @dev The direct CRL signer must explicitly enable the cRLSign KeyUsage bit
+error CRLSignNotSet();
 error CRLRequiredInStrictMode();
 error CRLExpiredInStrictMode();
 /// @dev Per RFC 5280 Section 5.2.1, conforming CRL issuers MUST include AKID extension
