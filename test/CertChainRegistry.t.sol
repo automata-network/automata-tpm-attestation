@@ -109,6 +109,33 @@ contract CertChainRegistry_Test is Test {
         chain = new bytes[](1);
         chain[0] = cert;
     }
+
+    function _identityDerNode(bytes1 tag, bytes memory content) internal pure returns (bytes memory) {
+        if (content.length < 128) return abi.encodePacked(tag, uint8(content.length), content);
+        if (content.length <= type(uint8).max) {
+            return abi.encodePacked(tag, bytes1(0x81), uint8(content.length), content);
+        }
+        require(content.length <= type(uint16).max, "Synthetic identity DER node too large");
+        return abi.encodePacked(tag, bytes1(0x82), uint16(content.length), content);
+    }
+
+    function _identityCertificate(bytes memory rsaData, bytes memory subjectDN) internal pure returns (bytes memory) {
+        bytes memory rsaAlgorithm = hex"300D06092A864886F70D0101010500";
+        bytes memory subjectPublicKey = _identityDerNode(0x03, abi.encodePacked(hex"00", rsaData));
+        bytes memory subjectPublicKeyInfo = _identityDerNode(0x30, abi.encodePacked(rsaAlgorithm, subjectPublicKey));
+        bytes memory tbs = _identityDerNode(
+            0x30,
+            abi.encodePacked(
+                hex"020101", // serial
+                hex"300306012A", // placeholder signature AlgorithmIdentifier
+                hex"3003020101", // placeholder issuer
+                hex"3003020101", // placeholder validity
+                subjectDN,
+                subjectPublicKeyInfo
+            )
+        );
+        return _identityDerNode(0x30, tbs);
+    }
 }
 
 /// @title CertChainRegistry_VerifySignature_Test
@@ -822,11 +849,9 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // Verify CRL was cached
         CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
-        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        bytes32 revocationScope = registry.computeRevocationScope(keccak256(caCert), caCert);
 
-        (bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate) = registry.crlCache(issuerHash);
+        (bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate) = registry.crlCache(revocationScope);
         assertEq(crlHash, keccak256(crlBytes), "CRL hash should match");
         assertEq(thisUpdate, crlInfo.thisUpdate, "thisUpdate should match");
         assertEq(nextUpdate, crlInfo.nextUpdate, "nextUpdate should match");
@@ -897,10 +922,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes[] memory certs = _loadCertificate("gcp_tdx_tpm_certs");
         require(certs.length == 3, "Need leaf, intermediate and root");
 
-        bytes memory signerIssuerDN = LibX509.getCertIssuerDN(certs[1]);
-        (bool akidExists, bytes memory signerAKID) = LibX509.getAuthorityKeyIdentifier(certs[1]);
-        assertTrue(akidExists && signerAKID.length > 0, "Signer fixture must identify its issuer");
-        bytes32 revocationScope = keccak256(abi.encode(signerIssuerDN, signerAKID));
+        bytes32 revocationScope = registry.computeRevocationScope(keccak256(certs[2]), certs[2]);
         uint256 signerSerial = LibX509.getCertSerialNumber(certs[1]);
         (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(certs[1]);
         assertTrue(keyUsageExists && (keyUsage & 0x0200) != 0, "Signer fixture must carry cRLSign");
@@ -946,11 +968,14 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
     /// @dev Catches removal of the signer AKID to issuer SKID linkage check.
     function test_verifyCRLSignerChain_akidSkidMismatch_reverts() public {
-        bytes[] memory certs = _loadCertificate("gcp_tdx_tpm_certs");
-        require(certs.length == 3, "Need leaf, intermediate and root");
+        vm.warp(1785196800);
 
-        bytes memory signer = certs[1];
-        bytes memory root = abi.encodePacked(certs[2]);
+        bytes[] memory chainA = _loadCertificate("collision_chain_a");
+        bytes[] memory chainB = _loadCertificate("collision_chain_b");
+        require(chainA.length == 3 && chainB.length == 3, "Need two three-level chains");
+
+        bytes memory signer = chainA[1];
+        bytes memory root = chainB[2];
         (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(signer);
         (bool akidExists, bytes memory akid) = LibX509.getAuthorityKeyIdentifier(signer);
         (bool skidExists, bytes memory skid) = LibX509.getSubjectKeyIdentifier(root);
@@ -961,42 +986,15 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
             "Fixture must pass DN linkage"
         );
         assertTrue(akidExists && akid.length > 0 && skidExists && skid.length > 0, "Fixture must carry AKID and SKID");
-        assertEq(keccak256(akid), keccak256(skid), "Original fixture must pass AKID/SKID linkage");
+        assertNotEq(keccak256(akid), keccak256(skid), "Fixture must reach the AKID/SKID-mismatch branch");
 
-        uint256 skidOffset = type(uint256).max;
-        for (uint256 i; i + skid.length <= root.length; i++) {
-            bool matches = true;
-            for (uint256 j; j < skid.length; j++) {
-                if (root[i + j] != skid[j]) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (matches) {
-                skidOffset = i;
-                break;
-            }
-        }
-        require(skidOffset != type(uint256).max, "SKID bytes must occur in root DER");
-        root[skidOffset + skid.length - 1] ^= 0x01;
-
-        (bool mutatedSkidExists, bytes memory mutatedSkid) = LibX509.getSubjectKeyIdentifier(root);
-        assertTrue(mutatedSkidExists, "Mutated root must retain SKID");
-        assertEq(
-            keccak256(LibX509.getCertIssuerDN(signer)),
-            keccak256(LibX509.getCertSubjectDN(root)),
-            "SKID mutation must preserve DN linkage"
-        );
-        assertNotEq(keccak256(akid), keccak256(mutatedSkid), "Fixture must reach the AKID/SKID-mismatch branch");
-
-        MockCertChainRegistry mock = MockCertChainRegistry(address(registry));
-        mock.exposedSetVerifiedCA(root, true);
+        registry.addCA(root);
         bytes[] memory signerChain = new bytes[](2);
         signerChain[0] = signer;
         signerChain[1] = root;
 
-        vm.expectRevert(abi.encodeWithSelector(CertChainAKIDMismatch.selector, uint256(0), akid, mutatedSkid));
-        mock.exposedVerifyCRLSignerChain(signerChain);
+        vm.expectRevert(abi.encodeWithSelector(CertChainAKIDMismatch.selector, uint256(0), akid, skid));
+        MockCertChainRegistry(address(registry)).exposedVerifyCRLSignerChain(signerChain);
     }
 
     /// @dev Catches removal of the cryptographic child-certificate signature verification.
@@ -1104,10 +1102,8 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         vm.prank(nonOwner);
         registry.updateCRL(crlBytes, _singletonChain(caCert));
 
-        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
-        (bytes32 cachedHash,,) = registry.crlCache(issuerHash);
+        bytes32 revocationScope = registry.computeRevocationScope(keccak256(caCert), caCert);
+        (bytes32 cachedHash,,) = registry.crlCache(revocationScope);
         assertEq(cachedHash, keccak256(crlBytes));
     }
 
@@ -1229,14 +1225,12 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         bytes memory crlBytes = _loadEmptyCRL();
         CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
-        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        bytes32 revocationScope = registry.computeRevocationScope(keccak256(caCert), caCert);
         bytes32 crlHash = keccak256(crlBytes);
 
         vm.expectEmit(true, false, false, true);
         emit ICertChainRegistry.CRLUpdated(
-            issuerHash, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
+            revocationScope, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
         );
 
         registry.updateCRL(crlBytes, _singletonChain(caCert));
@@ -1265,11 +1259,9 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // Verify cache was updated
         CRLInfo memory newCrlInfo = this._parseCRLHelper(revokedCrl);
-        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        bytes32 revocationScope = registry.computeRevocationScope(keccak256(caCert), caCert);
 
-        (bytes32 crlHash, uint256 thisUpdate,) = registry.crlCache(issuerHash);
+        (bytes32 crlHash, uint256 thisUpdate,) = registry.crlCache(revocationScope);
         assertEq(crlHash, keccak256(revokedCrl), "CRL hash should be updated");
         assertEq(thisUpdate, newCrlInfo.thisUpdate, "thisUpdate should be updated");
         assertTrue(thisUpdate > oldCrlInfo.thisUpdate, "New thisUpdate should be later");
@@ -1323,13 +1315,9 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // Verify CRL was cached
         CRLInfo memory crlInfo = this._parseCRLHelper(gcpCrl);
-        bytes memory issuerDN = LibX509.getCertSubjectDN(gcpRootCA);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(gcpRootCA);
+        bytes32 revocationScope = registry.computeRevocationScope(keccak256(gcpRootCA), gcpRootCA);
 
-        // Compute issuer hash (using DN + SKID since CRL has AKID)
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
-
-        (bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate) = registry.crlCache(issuerHash);
+        (bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate) = registry.crlCache(revocationScope);
 
         assertEq(crlHash, keccak256(gcpCrl), "CRL hash should match");
         assertEq(thisUpdate, crlInfo.thisUpdate, "thisUpdate should match");
@@ -1351,22 +1339,279 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         // Load CRL with revoked certificate
         bytes memory crlBytes = _loadRevokedCRL();
 
+        bytes[] memory chain = new bytes[](2);
+        chain[0] = leafCert;
+        chain[1] = caCert;
+
         // Verify certificate is not revoked before CRL update
-        assertFalse(registry.isCertificateRevoked(leafCert), "Certificate should not be revoked yet");
+        assertFalse(registry.isCertificateRevokedInChain(chain), "Certificate should not be revoked yet");
 
         // Update CRL - this should sync revocations to blacklist
         registry.updateCRL(crlBytes, _singletonChain(caCert));
 
         // Verify certificate is now revoked in blacklist
-        assertTrue(registry.isCertificateRevoked(leafCert), "Certificate should be revoked after CRL sync");
+        assertTrue(registry.isCertificateRevokedInChain(chain), "Certificate should be revoked after CRL sync");
 
         // Verify that verifyCertChain will fail for revoked certificate
-        bytes[] memory chain = new bytes[](2);
-        chain[0] = leafCert;
-        chain[1] = caCert;
+        vm.expectRevert(CertificateAlreadyRevoked.selector);
+        registry.verifyCertChain(chain);
+    }
+
+    function test_updateCRL_akidlessLeaf_isRevokedByIssuerPathScope() public {
+        vm.warp(1785196800);
+
+        bytes[] memory chain = _loadCertificate("akidless_ec_chain");
+        require(chain.length == 2, "Need leaf and root");
+
+        (bool akidExists, bytes memory akid) = LibX509.getAuthorityKeyIdentifier(chain[0]);
+        assertFalse(akidExists, "Leaf fixture must omit AKID");
+        assertEq(akid.length, 0, "Leaf fixture must have an empty AKID");
+
+        bytes memory root = chain[1];
+        registry.addCA(root);
+
+        CertPubkey memory leafPubkey = registry.verifyCertChain(chain);
+        assertTrue(leafPubkey.data.length > 0, "AKID-less leaf chain must initially verify");
+        assertFalse(registry.isCertificateRevokedInChain(chain), "Leaf must initially be active");
+
+        bytes[] memory crls = _loadCertificate("akidless_ec_crl");
+        require(crls.length == 1, "Need one CRL");
+        registry.updateCRL(crls[0], _singletonChain(root));
+
+        assertTrue(registry.isCertificateRevokedInChain(chain), "Issuer CRL must revoke AKID-less leaf");
+
+        bytes32 revocationScope = registry.computeRevocationScope(keccak256(root), root);
+        uint256 leafSerial = LibX509.getCertSerialNumber(chain[0]);
+        assertTrue(
+            registry.revokedCertificates(revocationScope, leafSerial),
+            "Revocation must be stored under the authenticated issuer identity"
+        );
 
         vm.expectRevert(CertificateAlreadyRevoked.selector);
         registry.verifyCertChain(chain);
+    }
+
+    function test_computeRevocationScope_sameIssuerAcrossRoots_isShared() public view {
+        bytes[] memory chain = _loadCertificate("akidless_ec_chain");
+        require(chain.length == 2, "Need leaf and root");
+
+        bytes memory issuerCert = chain[1];
+        bytes32 rootHash = keccak256(issuerCert);
+        bytes32 otherRootHash = keccak256("different trusted root");
+        bytes32 scope = registry.computeRevocationScope(rootHash, issuerCert);
+
+        assertEq(
+            scope,
+            registry.computeRevocationScope(otherRootHash, issuerCert),
+            "One issuer identity must share revocation state across roots"
+        );
+    }
+
+    function test_computeRevocationScope_equivalentRSAEncodings_areShared() public view {
+        bytes[] memory certs = _loadCertificate("gcp_snp_tpm_certs");
+        require(certs.length == 3, "Need leaf, intermediate and root");
+
+        CertPubkey memory rsaPubkey = MockCertChainRegistry(address(registry)).exposedGetPubkey(certs[1]);
+        (bytes memory n, bytes memory e) = LibX509.rsa(rsaPubkey);
+        bytes memory canonicalRsa = LibX509.newRsaPubkey(n, e).data;
+
+        bytes memory modulusInteger = uint8(n[0]) >= 0x80 ? abi.encodePacked(hex"00", n) : n;
+        bytes memory nonMinimalRsa = _identityDerNode(
+            0x30,
+            abi.encodePacked(
+                _identityDerNode(0x02, modulusInteger), _identityDerNode(0x02, abi.encodePacked(hex"00", e))
+            )
+        );
+        assertNotEq(keccak256(canonicalRsa), keccak256(nonMinimalRsa), "Raw RSA encodings must differ");
+
+        bytes memory subjectDN = hex"3003020101";
+        bytes memory canonicalCert = _identityCertificate(canonicalRsa, subjectDN);
+        bytes memory nonMinimalCert = _identityCertificate(nonMinimalRsa, subjectDN);
+
+        assertEq(
+            registry.computeRevocationScope(bytes32(0), canonicalCert),
+            registry.computeRevocationScope(bytes32(0), nonMinimalCert),
+            "Equivalent mathematical RSA keys must share one revocation scope"
+        );
+    }
+
+    function test_computeRevocationScope_canonicalRSA_preservesExistingScope() public view {
+        bytes[] memory certs = _loadCertificate("gcp_snp_tpm_certs");
+        require(certs.length == 3, "Need leaf, intermediate and root");
+        bytes memory issuerCert = certs[1];
+        CertPubkey memory pubkey = MockCertChainRegistry(address(registry)).exposedGetPubkey(issuerCert);
+
+        bytes32 issuerIdentity = keccak256(
+            abi.encode(
+                keccak256("AUTOMATA_ISSUER_IDENTITY_V1"),
+                keccak256(LibX509.getCertSubjectDN(issuerCert)),
+                pubkey.algo,
+                pubkey.params,
+                keccak256(pubkey.data)
+            )
+        );
+        bytes32 expectedScope = keccak256(abi.encode(keccak256("AUTOMATA_REVOCATION_SCOPE_V2"), issuerIdentity));
+
+        assertEq(registry.computeRevocationScope(bytes32(0), issuerCert), expectedScope);
+    }
+
+    function test_computeRevocationScope_ec_preservesExistingScope() public view {
+        bytes[] memory certs = _loadCertificate("akidless_ec_chain");
+        require(certs.length == 2, "Need leaf and root");
+        bytes memory issuerCert = certs[1];
+        CertPubkey memory pubkey = MockCertChainRegistry(address(registry)).exposedGetPubkey(issuerCert);
+
+        bytes32 issuerIdentity = keccak256(
+            abi.encode(
+                keccak256("AUTOMATA_ISSUER_IDENTITY_V1"),
+                keccak256(LibX509.getCertSubjectDN(issuerCert)),
+                pubkey.algo,
+                pubkey.params,
+                keccak256(pubkey.data)
+            )
+        );
+        bytes32 expectedScope = keccak256(abi.encode(keccak256("AUTOMATA_REVOCATION_SCOPE_V2"), issuerIdentity));
+
+        assertEq(registry.computeRevocationScope(bytes32(0), issuerCert), expectedScope);
+    }
+
+    function test_updateCRL_sameDNSKIDDifferentIssuerKeys_areIsolated() public {
+        vm.warp(1785196800);
+
+        bytes[] memory chainA = _loadCertificate("collision_chain_a");
+        bytes[] memory chainB = _loadCertificate("collision_chain_b");
+        require(chainA.length == 3 && chainB.length == 3, "Need two three-level chains");
+
+        assertEq(
+            keccak256(LibX509.getCertSubjectDN(chainA[1])),
+            keccak256(LibX509.getCertSubjectDN(chainB[1])),
+            "Issuer DNs must collide"
+        );
+        (, bytes memory skidA) = LibX509.getSubjectKeyIdentifier(chainA[1]);
+        (, bytes memory skidB) = LibX509.getSubjectKeyIdentifier(chainB[1]);
+        assertEq(keccak256(skidA), keccak256(skidB), "Issuer SKIDs must collide");
+        CertPubkey memory pubkeyA = MockCertChainRegistry(address(registry)).exposedGetPubkey(chainA[1]);
+        CertPubkey memory pubkeyB = MockCertChainRegistry(address(registry)).exposedGetPubkey(chainB[1]);
+        assertNotEq(keccak256(pubkeyA.data), keccak256(pubkeyB.data), "Issuer public keys must differ");
+        assertEq(
+            LibX509.getCertSerialNumber(chainA[0]), LibX509.getCertSerialNumber(chainB[0]), "Leaf serials must collide"
+        );
+
+        registry.addCA(chainA[2]);
+        registry.addCA(chainB[2]);
+        registry.verifyCertChain(chainA);
+        registry.verifyCertChain(chainB);
+
+        bytes[] memory signerChainA = new bytes[](2);
+        signerChainA[0] = chainA[1];
+        signerChainA[1] = chainA[2];
+        bytes[] memory crls = _loadCertificate("collision_crl_a");
+        registry.updateCRL(crls[0], signerChainA);
+
+        assertTrue(registry.isCertificateRevokedInChain(chainA), "Issuer A CRL must revoke chain A leaf");
+        assertFalse(registry.isCertificateRevokedInChain(chainB), "Issuer A CRL must not contaminate issuer B");
+
+        vm.expectRevert(CertificateAlreadyRevoked.selector);
+        registry.verifyCertChain(chainA);
+        registry.verifyCertChain(chainB);
+    }
+
+    function test_updateCRL_crossCertifiedIssuerSharesRevocationAcrossRoots() public {
+        vm.warp(1785196800);
+
+        bytes[] memory chainA = _loadCertificate("cross_cert_chain_a");
+        bytes[] memory chainB = _loadCertificate("cross_cert_chain_b");
+        bytes[] memory crls = _loadCertificate("cross_cert_crl");
+        require(chainA.length == 3 && chainB.length == 3 && crls.length == 1, "Need cross-cert fixtures");
+
+        assertEq(keccak256(chainA[0]), keccak256(chainB[0]), "Both paths must contain the same leaf");
+        assertNotEq(keccak256(chainA[1]), keccak256(chainB[1]), "Cross-certificates must be distinct");
+        assertNotEq(keccak256(chainA[2]), keccak256(chainB[2]), "Trusted roots must be distinct");
+        assertEq(
+            keccak256(LibX509.getCertSubjectDN(chainA[1])),
+            keccak256(LibX509.getCertSubjectDN(chainB[1])),
+            "Cross-certified issuer subjects must match"
+        );
+        CertPubkey memory issuerA = MockCertChainRegistry(address(registry)).exposedGetPubkey(chainA[1]);
+        CertPubkey memory issuerB = MockCertChainRegistry(address(registry)).exposedGetPubkey(chainB[1]);
+        assertEq(keccak256(issuerA.data), keccak256(issuerB.data), "Cross-certified issuer keys must match");
+
+        registry.addCA(chainA[2]);
+        registry.addCA(chainB[2]);
+        registry.verifyCertChain(chainA);
+        registry.verifyCertChain(chainB);
+
+        bytes[] memory signerChainA = new bytes[](2);
+        signerChainA[0] = chainA[1];
+        signerChainA[1] = chainA[2];
+        registry.updateCRL(crls[0], signerChainA);
+
+        assertTrue(registry.isCertificateRevokedInChain(chainA), "Path A must observe issuer revocation");
+        assertTrue(registry.isCertificateRevokedInChain(chainB), "Path B must share the same issuer revocation");
+        bytes32 scopeA = registry.computeRevocationScope(keccak256(chainA[2]), chainA[1]);
+        bytes32 scopeB = registry.computeRevocationScope(keccak256(chainB[2]), chainB[1]);
+        assertEq(scopeA, scopeB, "Cross-certified issuer must resolve to one revocation scope");
+
+        vm.expectRevert(CertificateAlreadyRevoked.selector);
+        registry.verifyCertChain(chainB);
+    }
+
+    function test_isCertificateRevokedInChain_trustedRootTarget_returnsFalse() public {
+        vm.warp(1785196800);
+
+        bytes[] memory certs = _loadCertificate("akidless_ec_chain");
+        require(certs.length == 2, "Need leaf and root");
+
+        bytes memory root = certs[1];
+        registry.addCA(root);
+
+        bytes[] memory rootChain = _singletonChain(root);
+        assertFalse(registry.isCertificateRevokedInChain(rootChain), "Trusted root must be active in its self scope");
+    }
+
+    function test_isCertificateRevokedInChain_intermediateTarget_returnsFalse() public {
+        bytes[] memory certs = _loadCertificate("gcp_tdx_tpm_certs");
+        require(certs.length == 3, "Need leaf, intermediate and root");
+        registry.addCA(certs[2]);
+
+        bytes[] memory intermediateChain = new bytes[](2);
+        intermediateChain[0] = certs[1];
+        intermediateChain[1] = certs[2];
+
+        assertFalse(
+            registry.isCertificateRevokedInChain(intermediateChain),
+            "Authenticated intermediate must be queryable as a CA target"
+        );
+    }
+
+    function test_computeRevocationScope_differentIssuerIdentities_areIsolated() public view {
+        bytes[] memory issuerChain = _loadCertificate("akidless_ec_chain");
+        bytes[] memory otherIssuerChain = _loadCertificate("self_signed_ec_ca");
+        require(issuerChain.length == 2 && otherIssuerChain.length == 2, "Need two issuer fixtures");
+
+        bytes32 rootHash = keccak256(issuerChain[1]);
+        bytes32 scope = registry.computeRevocationScope(rootHash, issuerChain[1]);
+        bytes32 otherScope = registry.computeRevocationScope(rootHash, otherIssuerChain[1]);
+
+        assertNotEq(scope, otherScope, "Different issuer subject/key identities must remain isolated");
+    }
+
+    function test_computeRevocationScope_ignoresCertificateSignatureBytes() public view {
+        bytes[] memory chain = _loadCertificate("akidless_ec_chain");
+        require(chain.length == 2, "Need leaf and root");
+
+        bytes memory issuerCert = chain[1];
+        bytes memory issuerVariant = abi.encodePacked(issuerCert);
+        uint256 lastIndex = issuerVariant.length - 1;
+        issuerVariant[lastIndex] = bytes1(uint8(issuerVariant[lastIndex]) ^ 0x01);
+
+        assertNotEq(keccak256(issuerCert), keccak256(issuerVariant), "Fixture certificate hashes must differ");
+
+        bytes32 rootHash = keccak256(issuerCert);
+        bytes32 scope = registry.computeRevocationScope(rootHash, issuerCert);
+        bytes32 variantScope = registry.computeRevocationScope(rootHash, issuerVariant);
+
+        assertEq(scope, variantScope, "Issuer identity must depend on subject/SPKI, not certificate signature");
     }
 
     /// @notice Test updateCRL syncs multiple revoked certificates
@@ -1388,14 +1633,12 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         registry.updateCRL(crlBytes, _singletonChain(caCert));
 
         // Verify all revoked serials are synced to blacklist
-        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        bytes32 revocationScope = registry.computeRevocationScope(keccak256(caCert), caCert);
 
         // Check that all revoked serials from CRL are now in blacklist
         for (uint256 i = 0; i < crlInfo.revokedSerials.length; i++) {
             uint256 serial = crlInfo.revokedSerials[i];
-            assertTrue(registry.revokedCertificates(issuerHash, serial), "Revoked serial should be in blacklist");
+            assertTrue(registry.revokedCertificates(revocationScope, serial), "Revoked serial should be in blacklist");
         }
     }
 

@@ -35,11 +35,11 @@ remappings = [
 `LibX509` exposes certificate-validation and CRL-parsing helpers as externally
 linked library functions so the `TpmAttestation` runtime stays below the
 EIP-170 contract-size limit. These include
-`validateCertificateExtensions` and `parseCRL`. The repository's Foundry tests
-and deployment script deploy and link the library automatically. Tooling that
-consumes precompiled artifacts directly must deploy `LibX509` first and supply
-its address when linking `TpmAttestation` (for Forge, use
-`--libraries src/lib/LibX509.sol:LibX509:<address>`).
+`validateCertificateExtensions`, `parseCRL`, and `canonicalPubkeyHash`. The
+repository's Foundry tests and deployment script deploy and link the library
+automatically. Tooling that consumes precompiled artifacts directly must deploy
+`LibX509` first and supply its address when linking `TpmAttestation` (for Forge,
+use `--libraries src/lib/LibX509.sol:LibX509:<address>`).
 
 The linked address is embedded in the implementation bytecode, so changing it
 also changes the initcode hash and any CREATE2-derived deployment address.
@@ -291,6 +291,9 @@ This function:
   in `signerChain`
 - Validates the CRL issuer DN and AKID against the signer certificate
 - Requires the final root certificate to be present in `verifiedCA`
+- Stores the CRL and revocations in a namespace bound to the signer's subject
+  DN and public key. The same CA identity therefore shares revocation state
+  across cross-certification and root-certificate renewal paths
 - In strict CRL mode, requires current CRLs for every issuing CA above a
   subordinate signer (upload the root CRL first)
 - Accepts only direct, complete CRLs; delta, partitioned, and indirect CRLs are
@@ -332,13 +335,38 @@ intermediateSignerChain[1] = rootCaCert;
 tpmAttestation.updateCRL(intermediateCrl, intermediateSignerChain);
 ```
 
-#### `isCertificateRevoked(bytes cert)`
+#### `isCertificateRevokedInChain(bytes[] certChain)`
 
-Check if a certificate has been revoked.
+Check whether a target certificate is revoked using its authenticated issuer
+and trusted-root context. The chain order is
+`[target, issuer, ..., trusted root]`; a trusted root may be queried as a
+one-element chain. The path is validated before issuer revocation state is
+queried, so a leaf without AKID still resolves through its actual issuer
+certificate.
 
 ```solidity
-function isCertificateRevoked(bytes calldata cert) external view returns (bool);
+function isCertificateRevokedInChain(bytes[] calldata certChain) external view returns (bool);
 ```
+
+The scope used by `crlCache` and `revokedCertificates` can be reproduced with:
+
+```solidity
+bytes32 scope = tpmAttestation.computeRevocationScope(
+    keccak256(trustedRootCert),
+    issuerCert
+);
+```
+
+The root-hash argument is retained for ABI compatibility but is not part of the
+scope. Trust in the supplied path is still verified separately; keeping CRL
+state issuer-scoped prevents cross-certification or root-renewal paths from
+bypassing an already known revocation. RSA issuer identity hashes canonical
+mathematical public-key encoding, while exact subject-DN DER remains part of the
+scope; EC public-key bytes are hashed unchanged.
+
+The scope format is not compatible with the previous global `DN + AKID` key.
+After deploying this version, add the trusted roots again and resubmit current
+CRLs in root-to-intermediate order before enabling strict CRL mode.
 
 #### `setStrictCRLMode(bool enabled)`
 

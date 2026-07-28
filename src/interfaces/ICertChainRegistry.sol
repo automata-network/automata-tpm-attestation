@@ -5,7 +5,7 @@ pragma solidity ^0.8.0;
 import {CertPubkey} from "../lib/LibX509.sol";
 
 /// @notice CRL cache data structure
-/// @dev Stores Certificate Revocation List information for a specific issuer
+/// @dev Stores Certificate Revocation List information for an authenticated issuer identity
 struct CRLData {
     bytes32 crlHash; // Hash of current CRL (for external reference/indexing)
     uint256 thisUpdate; // Timestamp when CRL was issued
@@ -20,10 +20,15 @@ interface ICertChainRegistry {
     event RemoveCA(bytes ca);
     event IntermediateCertRemoved(bytes32 indexed certHash);
     event CertificateRevoked(
-        bytes32 indexed issuerHash, bytes issuerDN, bytes akid, uint256 serialNumber, string reason
+        bytes32 indexed revocationScope, bytes issuerDN, bytes akid, uint256 serialNumber, string reason
     );
     event CRLUpdated(
-        bytes32 indexed issuerHash, bytes issuerDN, bytes akid, bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate
+        bytes32 indexed revocationScope,
+        bytes issuerDN,
+        bytes akid,
+        bytes32 crlHash,
+        uint256 thisUpdate,
+        uint256 nextUpdate
     );
     event StrictCRLModeChanged(bool enabled);
 
@@ -40,10 +45,16 @@ interface ICertChainRegistry {
     /// @dev should implement access-control
     function removeCA(bytes calldata ca) external;
 
-    /// @notice Check if a certificate is revoked
-    /// @param cert The DER-encoded certificate to check
-    /// @return True if the certificate is revoked
-    function isCertificateRevoked(bytes calldata cert) external view returns (bool);
+    /// @notice Check whether the target certificate is revoked in an authenticated chain
+    /// @param certChain Certificates ordered as [target, issuer, ..., trusted root]
+    /// @return True if the target certificate is revoked by its authenticated issuer
+    function isCertificateRevokedInChain(bytes[] calldata certChain) external view returns (bool);
+
+    /// @notice Compute the revocation namespace for an issuer certificate identity
+    /// @param rootCertHash Compatibility parameter; authenticated path validation still
+    ///        uses the root, but the issuer's revocation namespace does not
+    /// @param issuerCert DER-encoded issuer certificate
+    function computeRevocationScope(bytes32 rootCertHash, bytes calldata issuerCert) external pure returns (bytes32);
 
     function removeIntermediateCerts(bytes32[] calldata certHashes) external;
 

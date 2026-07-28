@@ -216,13 +216,23 @@ library LibX509 {
         if (eLength >= 0x80) revert InvalidRsaExponentSize();
     }
 
+    function _trimLeadingZeros(bytes memory value) private pure returns (bytes memory) {
+        uint256 offset;
+        while (offset < value.length && value[offset] == 0x00) {
+            offset++;
+        }
+        if (offset == 0) return value;
+        if (offset == value.length) return new bytes(0);
+        return value.slice(offset, value.length - offset);
+    }
+
     /// @notice Extracts the modulus and exponent from an RSA public key
     /// @dev Per RFC 3279 Section 2.3.1, RSA public key is: RSAPublicKey ::= SEQUENCE { modulus n, publicExponent e }
     ///      This function parses the DER-encoded RSA public key and extracts n and e.
-    ///      Leading zero bytes in the modulus are trimmed to return the minimal representation.
+    ///      Both values are returned without DER sign-padding or redundant leading zeroes.
     /// @param pubkey The RSA public key struct
     /// @return n The RSA modulus (leading zeros trimmed)
-    /// @return e The RSA public exponent
+    /// @return e The RSA public exponent (leading zeros trimmed)
     function rsa(CertPubkey memory pubkey) internal pure returns (bytes memory n, bytes memory e) {
         if (pubkey.algo != TPMConstants.TPM_ALG_RSA) {
             revert NotRsaPublicKey();
@@ -232,19 +242,19 @@ library LibX509 {
         uint256 root = pubkey.data.root();
         uint256 parentPtr = pubkey.data.firstChildOf(root);
         uint256 next = pubkey.data.nextSiblingOf(parentPtr);
-        n = pubkey.data.bytesAt(parentPtr);
-
-        // trim prefix 0
-        for (uint256 i; i < n.length; i++) {
-            if (n[i] != 0x00) {
-                if (i > 0) {
-                    n = n.slice(i, n.length - i);
-                }
-                break;
-            }
-        }
-        e = pubkey.data.bytesAt(next);
+        n = _trimLeadingZeros(pubkey.data.bytesAt(parentPtr));
+        e = _trimLeadingZeros(pubkey.data.bytesAt(next));
         validateRsa(n, e);
+    }
+
+    function canonicalPubkeyHash(CertPubkey calldata pubkey) external pure returns (bytes32) {
+        CertPubkey memory key = pubkey;
+        if (key.algo == TPMConstants.TPM_ALG_RSA) {
+            (bytes memory n, bytes memory e) = rsa(key);
+            CertPubkey memory canonical = newRsaPubkey(n, e);
+            return keccak256(canonical.data);
+        }
+        return keccak256(key.data);
     }
 
     /// @notice Parses X.509 signatureAlgorithm OID to extract signature scheme and hash algorithm
