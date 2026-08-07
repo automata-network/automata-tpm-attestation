@@ -38,6 +38,10 @@ contract TPMTest is SetupBase {
         assertTrue(success, errorMessage);
     }
 
+    function test_TpmAttestation_runtimeSize_withinEIP170Limit() public view {
+        assertLe(address(tpmAttestation).code.length, 24_576, "Runtime exceeds EIP-170 limit");
+    }
+
     function test_TpmWithCertchain() public {
         // pinned July 22, 2025, 1840h UTC+8
         vm.warp(1753180800);

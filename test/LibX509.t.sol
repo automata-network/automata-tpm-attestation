@@ -34,9 +34,156 @@ contract LibX509_Test is Test {
         LibX509.checkCAConstraints(der, remainingCAs, isLeaf);
     }
 
+    /// @notice Helper function to wrap internal getKeyUsage for testing with vm.expectRevert
+    function _getKeyUsage(bytes memory der) public pure returns (bool exists, uint16 keyUsage) {
+        return LibX509.getKeyUsage(der);
+    }
+
     /// @notice Helper to parse serial number bytes to uint256
     function _parseSerialNumber(bytes memory serialBytes) internal pure returns (uint256 serial) {
         return LibX509._parseSerialNumber(serialBytes);
+    }
+
+    function _validateCertificateExtensions(bytes calldata der) external pure {
+        LibX509.validateCertificateExtensions(der);
+    }
+
+    function _findFirst(bytes memory value, bytes memory needle) internal pure returns (uint256) {
+        for (uint256 i; i + needle.length <= value.length; ++i) {
+            bool matches = true;
+            for (uint256 j; j < needle.length; ++j) {
+                if (value[i + j] != needle[j]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return i;
+        }
+        revert("fixture pattern not found");
+    }
+
+    function _replaceFirst(bytes memory value, bytes memory needle, bytes memory replacement)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        require(needle.length == replacement.length, "replacement length mismatch");
+        uint256 offset = _findFirst(value, needle);
+        for (uint256 i; i < replacement.length; ++i) {
+            value[offset + i] = replacement[i];
+        }
+        return value;
+    }
+}
+
+/// @title Strict certificate-extension validation tests
+contract LibX509_CertificateExtensions_Test is LibX509_Test {
+    function test_validateCertificateExtensions_existingFixtures_succeed() public view {
+        string[9] memory certTypes = [
+            "gcp_snp_vek_certs",
+            "azure_snp_vek_certs",
+            "gcp_tdx_tpm_certs",
+            "gcp_snp_tpm_certs",
+            "self_signed_ec_ca",
+            "akidless_ec_chain",
+            "collision_chain_a",
+            "cross_cert_chain_a",
+            "cross_cert_chain_b"
+        ];
+
+        for (uint256 i; i < certTypes.length; ++i) {
+            bytes[] memory certs = _loadCertificate(certTypes[i]);
+            for (uint256 j; j < certs.length; ++j) {
+                LibX509.validateCertificateExtensions(certs[j]);
+            }
+        }
+    }
+
+    function test_validateCertificateExtensions_unknownNonCritical_succeeds() public view {
+        bytes memory cert = _loadCertificate("gcp_snp_vek_certs")[2];
+        cert = _replaceFirst(cert, hex"0603551d0e", hex"0603551d7e");
+        LibX509.validateCertificateExtensions(cert);
+    }
+
+    function test_validateCertificateExtensions_unknownCritical_reverts() public {
+        bytes memory cert = _loadCertificate("gcp_snp_vek_certs")[2];
+        cert = _replaceFirst(cert, hex"0603551d0f0101ff", hex"0603551d7f0101ff");
+
+        vm.expectRevert(UnsupportedCriticalCertificateExtension.selector);
+        this._validateCertificateExtensions(cert);
+    }
+
+    function test_validateCertificateExtensions_criticalNameConstraints_reverts() public {
+        bytes memory cert = _loadCertificate("gcp_snp_vek_certs")[2];
+        cert = _replaceFirst(cert, hex"0603551d0f0101ff", hex"0603551d1e0101ff");
+
+        vm.expectRevert(NameConstraintsNotSupported.selector);
+        this._validateCertificateExtensions(cert);
+    }
+
+    function test_validateCertificateExtensions_nonCriticalNameConstraints_reverts() public {
+        bytes memory cert = _loadCertificate("gcp_snp_vek_certs")[2];
+        cert = _replaceFirst(cert, hex"0603551d0e", hex"0603551d1e");
+
+        vm.expectRevert(NameConstraintsNotSupported.selector);
+        this._validateCertificateExtensions(cert);
+    }
+
+    function test_validateCertificateExtensions_duplicateOid_reverts() public {
+        bytes memory cert = _loadCertificate("gcp_snp_vek_certs")[2];
+        cert = _replaceFirst(cert, hex"0603551d0e", hex"0603551d0f");
+
+        vm.expectRevert(DuplicateCertificateExtension.selector);
+        this._validateCertificateExtensions(cert);
+    }
+
+    function test_validateCertificateExtensions_explicitDefaultFalse_reverts() public {
+        bytes memory cert = _loadCertificate("gcp_snp_vek_certs")[2];
+        cert = _replaceFirst(cert, hex"0603551d0f0101ff", hex"0603551d0f010100");
+
+        vm.expectRevert(InvalidCertificateExtensions.selector);
+        this._validateCertificateExtensions(cert);
+    }
+
+    function test_validateCertificateExtensions_nonCanonicalOid_reverts() public {
+        bytes memory cert = _loadCertificate("gcp_snp_vek_certs")[2];
+        cert = _replaceFirst(cert, hex"0603551d0f", hex"060355800f");
+
+        vm.expectRevert(InvalidCertificateExtensions.selector);
+        this._validateCertificateExtensions(cert);
+    }
+
+    function test_validateCertificateExtensions_malformedExtensionSequence_reverts() public {
+        bytes memory cert = _loadCertificate("gcp_snp_vek_certs")[2];
+        uint256 oidOffset = _findFirst(cert, hex"0603551d0f0101ff");
+        assertEq(uint8(cert[oidOffset - 2]), 0x30, "Expected KeyUsage Extension SEQUENCE");
+        cert[oidOffset - 2] = 0x31;
+
+        vm.expectRevert(InvalidCertificateExtensions.selector);
+        this._validateCertificateExtensions(cert);
+    }
+
+    function test_validateCertificateExtensions_signatureAlgorithmsMustMatch() public {
+        bytes memory cert = _loadCertificate("self_signed_ec_ca")[1];
+        bytes memory signatureOid = hex"06082A8648CE3D040302";
+        uint256 occurrences;
+        for (uint256 i; i + signatureOid.length <= cert.length; ++i) {
+            bool matches = true;
+            for (uint256 j; j < signatureOid.length; ++j) {
+                if (cert[i + j] != signatureOid[j]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches && ++occurrences == 2) {
+                cert[i + signatureOid.length - 1] = 0x03;
+                break;
+            }
+        }
+        require(occurrences == 2, "outer signature algorithm not found");
+
+        vm.expectRevert(CertificateSignatureAlgorithmMismatch.selector);
+        this._validateCertificateExtensions(cert);
     }
 }
 
@@ -129,6 +276,14 @@ contract LibX509_basicConstraints_Test is LibX509_Test {
             assertLe(pathLen, 5, "Intermediate CA pathLen should be reasonable");
         }
     }
+
+    function test_getBasicConstraints_explicitDefaultFalse_reverts() public {
+        bytes memory cert = _loadCertificate("gcp_snp_vek_certs")[2];
+        cert = _replaceFirst(cert, hex"30030101ff", hex"3003010100");
+
+        vm.expectRevert(InvalidBasicConstraintsFormat.selector);
+        this._checkCAConstraints(cert, 0, false);
+    }
 }
 
 /// @title LibX509_KeyUsage_Test
@@ -142,6 +297,26 @@ contract LibX509_KeyUsage_Test is LibX509_Test {
     uint16 constant KEY_USAGE_KEY_AGREEMENT = 0x0800; // bit 4
     uint16 constant KEY_USAGE_KEY_CERT_SIGN = 0x0400; // bit 5
     uint16 constant KEY_USAGE_CRL_SIGN = 0x0200; // bit 6
+
+    /// @dev Returns the offset of the fixture's complete KeyUsage extension value.
+    ///      The selected root encodes it as BIT STRING `03 02 01 06`: one unused
+    ///      bit followed by keyCertSign and cRLSign.
+    function _keyUsageValueOffset(bytes memory certificate) private pure returns (uint256) {
+        bytes memory pattern = hex"0603551d0f0101ff040403020106";
+
+        for (uint256 i = 0; i + pattern.length <= certificate.length; i++) {
+            bool matches = true;
+            for (uint256 j = 0; j < pattern.length; j++) {
+                if (certificate[i + j] != pattern[j]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return i;
+        }
+
+        revert("KeyUsage fixture pattern not found");
+    }
 
     /// @notice Tests that getKeyUsage correctly extracts KeyUsage from root CA certificates
     function test_getKeyUsage_rootCA_hasKeyCertSign() public view {
@@ -220,6 +395,38 @@ contract LibX509_KeyUsage_Test is LibX509_Test {
 
         // CA certificates typically have multiple KeyUsage bits set
         assertGe(bitCount, 1, "CA should have at least one KeyUsage bit set");
+    }
+
+    function test_getKeyUsage_revertsWhenUnusedPaddingBitIsSet() public {
+        bytes memory rootCert = _loadCertificate("gcp_snp_vek_certs")[2];
+        uint256 extensionOffset = _keyUsageValueOffset(rootCert);
+
+        // Equal-length mutation: 0x06 -> 0x07 sets the single unused bit.
+        rootCert[extensionOffset + 13] = 0x07;
+
+        vm.expectRevert(InvalidBitString.selector);
+        this._getKeyUsage(rootCert);
+    }
+
+    function test_getKeyUsage_revertsWhenCRLSignIsDeclaredUnused() public {
+        bytes memory rootCert = _loadCertificate("gcp_snp_vek_certs")[2];
+        uint256 extensionOffset = _keyUsageValueOffset(rootCert);
+
+        // Equal-length mutation: declaring two unused bits makes the 0x02
+        // cRLSign-looking bit padding, so it must not be accepted as cRLSign.
+        rootCert[extensionOffset + 12] = 0x02;
+
+        vm.expectRevert(InvalidBitString.selector);
+        this._getKeyUsage(rootCert);
+    }
+
+    function test_getKeyUsage_revertsWhenNoUsageBitIsSet() public {
+        bytes memory rootCert = _loadCertificate("gcp_snp_vek_certs")[2];
+        uint256 extensionOffset = _keyUsageValueOffset(rootCert);
+        rootCert[extensionOffset + 13] = 0x00;
+
+        vm.expectRevert(InvalidBitString.selector);
+        this._getKeyUsage(rootCert);
     }
 }
 

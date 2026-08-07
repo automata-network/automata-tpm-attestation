@@ -9,6 +9,7 @@ import {CertPubkey, LibX509, SignatureAlgorithm, CRLInfo} from "../lib/LibX509.s
 import {LibX509Verify} from "../lib/LibX509Verify.sol";
 import {
     InvalidCertChainLength,
+    InvalidCertificateChain,
     InvalidSignature,
     CertNotCa,
     CertificateAlreadyRevoked,
@@ -18,10 +19,13 @@ import {
     CRLIssuerMismatch,
     CRLRollbackAttempt,
     InvalidCRLFormat,
+    CRLSignerNotTrusted,
+    CRLSignNotSet,
     CRLRequiredInStrictMode,
     CRLExpiredInStrictMode,
     CRLMissingAKID,
     IssuerCertMissingSKID,
+    CertChainAKIDMismatch,
     IssuerSubjectDNMismatch,
     RootCaNotAtEndOfChain,
     ZeroAddress
@@ -38,6 +42,10 @@ import {
 abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     using LibX509 for bytes;
     using LibX509Verify for CertPubkey;
+
+    bytes32 private constant ISSUER_IDENTITY_V1 = keccak256("AUTOMATA_ISSUER_IDENTITY_V1");
+    bytes32 private constant REVOCATION_SCOPE_V2 = keccak256("AUTOMATA_REVOCATION_SCOPE_V2");
+    bytes32 internal constant REVOKED_SET_DOMAIN = keccak256("AUTOMATA_CRL_REVOKED_SET_V1");
 
     /// @notice Address of the P-256 (secp256r1) signature verifier for ECDSA certificate verification
     /// @dev If the chain supports the RIP-7212 secp256r1 precompile (address 0x100), this can be set
@@ -57,17 +65,18 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     ///      preventing certificate substitution attacks across different CA hierarchies.
     mapping(bytes32 bindingHash => bytes32 rootCAHash) public cachedIntermediates;
 
-    /// @notice Revocation blacklist indexed by issuer DN hash and serial number
-    /// @dev Maps keccak256(issuerDN) => serialNumber => isRevoked
-    ///      Revoked certificates fail verification even if otherwise valid
-    mapping(bytes32 issuerHash => mapping(uint256 serialNumber => bool isRevoked)) public revokedCertificates;
+    mapping(bytes32 revocationScope => bytes32 setHash) public activeRevokedSetHash;
+    mapping(bytes32 setHash => bool isIndexed) internal _indexedRevokedSets;
+    mapping(bytes32 setHash => mapping(uint256 serialNumber => bool isMember)) internal _revokedSerials;
 
-    // CRL cache: issuerHash => CRLData
-    // issuerHash = keccak256(abi.encode(issuerDN, akid))
-    mapping(bytes32 issuerHash => CRLData crlData) public crlCache;
+    // CRL cache: authenticated revocation scope => CRLData
+    mapping(bytes32 revocationScope => CRLData crlData) public crlCache;
 
     // Strict mode: requires valid CRL for certificate chain verification
     bool public strictCRLMode;
+
+    // Latest accepted CRLNumber for each authenticated issuer identity
+    mapping(bytes32 revocationScope => uint256 crlNumber) public latestCRLNumber;
 
     constructor(address _intialOwner, address _p256) Ownable(_intialOwner) {
         if (_p256 == address(0)) revert ZeroAddress("p256");
@@ -83,6 +92,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     function addCA(bytes calldata ca) public override onlyOwner {
         bytes32 key = keccak256(ca);
         _verifyCertificateConstraints(ca, false, 0);
+        _requireCertificateNotRevoked(ca, _computeRevocationScope(ca));
 
         CertPubkey memory issuer = LibX509.getPubkey(ca);
         bool result = verifyCertSignature(ca, issuer);
@@ -109,17 +119,46 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         emit StrictCRLModeChanged(enabled);
     }
 
-    /// @notice Check if a certificate is revoked
-    /// @param cert The DER-encoded certificate to check
-    /// @return True if the certificate is revoked
-    function isCertificateRevoked(bytes calldata cert) public view returns (bool) {
-        bytes memory issuerDN = LibX509.getCertIssuerDN(cert);
-        uint256 serialNumber = LibX509.getCertSerialNumber(cert);
+    function revokedCertificates(bytes32 revocationScope, uint256 serialNumber) public view returns (bool) {
+        bytes32 setHash = activeRevokedSetHash[revocationScope];
+        return setHash != bytes32(0) && _revokedSerials[setHash][serialNumber];
+    }
 
-        (, bytes memory akid) = LibX509.getAuthorityKeyIdentifier(cert);
-        bytes32 issuerHash = _computeRevocationKey(issuerDN, akid);
+    /// @notice Check whether a target certificate is revoked in an authenticated chain
+    /// @param certChain Certificates ordered as [target, issuer, ..., trusted root]
+    /// @return True if the target is revoked by its authenticated issuer
+    function isCertificateRevokedInChain(bytes[] calldata certChain) public view returns (bool) {
+        uint256 certLen = certChain.length;
+        if (certLen == 0 || certLen > 4) {
+            revert InvalidCertChainLength();
+        }
 
-        return revokedCertificates[issuerHash][serialNumber];
+        bytes32 rootCertHash = keccak256(certChain[certLen - 1]);
+        if (!verifiedCA[rootCertHash]) {
+            revert RootCaNotAtEndOfChain();
+        }
+
+        if (strictCRLMode) {
+            _checkCRLValidityForChain(certChain);
+        }
+
+        // Authenticate the supplied path while allowing the target's revocation
+        // status to be returned instead of reverting during path validation.
+        (, bool targetIsCA,,) = LibX509.getBasicConstraints(certChain[0]);
+        _verifyChain(certChain, certLen - 1, !targetIsCA, true);
+
+        uint256 issuerIndex = certLen > 1 ? 1 : 0;
+        bytes32 revocationScope = _computeRevocationScope(certChain[issuerIndex]);
+        uint256 serialNumber = LibX509.getCertSerialNumber(certChain[0]);
+        return revokedCertificates(revocationScope, serialNumber);
+    }
+
+    /// @notice Compute the authenticated revocation namespace for an issuer
+    /// @dev The identity is stable across cross-certification and certificate renewals
+    ///      that retain the same subject DN and public key.
+    function computeRevocationScope(bytes32 rootCertHash, bytes calldata issuerCert) public pure returns (bytes32) {
+        rootCertHash; // Retained for ABI compatibility; issuer identity is root-independent.
+        return _computeRevocationScope(issuerCert);
     }
 
     /// @notice Removes cached intermediate certificates from the registry
@@ -138,13 +177,21 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
 
     /// @notice Update CRL for a specific issuer
     /// @param crl The DER-encoded CRL
-    /// @param issuerCert The issuer's certificate for signature verification
+    /// @param signerChain The CRL signer chain ordered as [signer, parent(s), trusted root]
     /// @dev The function verifies:
     /// @dev 1. CRL validity period (thisUpdate <= now < nextUpdate)
-    /// @dev 2. CRL signature against issuer's public key
-    /// @dev 3. Issuer DN and AKID match
-    /// @dev 4. Anti-rollback: new CRL's thisUpdate must be >= cached CRL's thisUpdate
-    function updateCRL(bytes calldata crl, bytes calldata issuerCert) public {
+    /// @dev 2. CRL signer chain terminates at a root in verifiedCA
+    /// @dev 3. Every certificate is valid/authorized as a CA, and every non-root is signed by its parent
+    /// @dev 4. The direct signer has the cRLSign key usage
+    /// @dev 5. CRL signature, issuer DN, and AKID match the direct signer
+    /// @dev 6. Anti-rollback: CRLNumber must strictly increase and thisUpdate must not decrease
+    /// @dev In strict CRL mode, the signer path must also have current issuer CRLs.
+    function updateCRL(bytes calldata crl, bytes[] calldata signerChain) public {
+        uint256 signerChainLength = signerChain.length;
+        if (signerChainLength == 0 || signerChainLength > 4) {
+            revert InvalidCertChainLength();
+        }
+
         // Parse CRL
         CRLInfo memory crlInfo = LibX509.parseCRL(crl);
 
@@ -156,8 +203,12 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
             revert CRLExpired();
         }
 
-        bytes32 issuerHash;
-        bytes memory akidForHash;
+        // Authenticate the exact CRL signer back to a currently trusted root.
+        _verifyCRLSignerChain(signerChain);
+        bytes calldata issuerCert = signerChain[0];
+
+        bytes32 revocationScope;
+        bytes memory authorityKeyId;
         {
             // Extract issuer cert information
             bytes memory issuerCertDN = LibX509.getCertSubjectDN(issuerCert);
@@ -183,9 +234,8 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
                 revert CRLIssuerMismatch();
             }
 
-            // Use AKID for issuer hash (now guaranteed to be present)
-            akidForHash = crlInfo.authorityKeyId;
-            issuerHash = _computeRevocationKey(crlInfo.issuerDN, akidForHash);
+            authorityKeyId = crlInfo.authorityKeyId;
+            revocationScope = _computeRevocationScope(issuerCert);
         }
 
         {
@@ -200,29 +250,108 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         }
 
         // Anti-rollback check
-        CRLData storage cached = crlCache[issuerHash];
-        if (cached.thisUpdate > 0 && crlInfo.thisUpdate < cached.thisUpdate) {
-            revert CRLRollbackAttempt();
-        }
-
-        // Sync revoked certificates to blacklist
-        for (uint256 i = 0; i < crlInfo.revokedSerials.length; i++) {
-            uint256 serialNumber = crlInfo.revokedSerials[i];
-            if (!revokedCertificates[issuerHash][serialNumber]) {
-                revokedCertificates[issuerHash][serialNumber] = true;
-                emit CertificateRevoked(issuerHash, crlInfo.issuerDN, akidForHash, serialNumber, "Synced from CRL");
+        CRLData storage cached = crlCache[revocationScope];
+        if (cached.crlHash != bytes32(0)) {
+            if (crlInfo.crlNumber <= latestCRLNumber[revocationScope] || crlInfo.thisUpdate < cached.thisUpdate) {
+                revert CRLRollbackAttempt();
             }
         }
 
-        // Update cache
+        bytes32 revokedSetHash = _computeRevokedSetHash(revocationScope, crlInfo.revokedSerials);
+        bool reused = _indexedRevokedSets[revokedSetHash];
+
+        if (!reused) {
+            for (uint256 i = 0; i < crlInfo.revokedSerials.length; i++) {
+                uint256 serialNumber = crlInfo.revokedSerials[i];
+                _revokedSerials[revokedSetHash][serialNumber] = true;
+                emit CertificateRevoked(
+                    revocationScope, crlInfo.issuerDN, authorityKeyId, serialNumber, "Indexed from complete CRL"
+                );
+            }
+            _indexedRevokedSets[revokedSetHash] = true;
+        }
+
+        activeRevokedSetHash[revocationScope] = revokedSetHash;
+
         bytes32 crlHash = keccak256(crl);
         cached.crlHash = crlHash;
         cached.thisUpdate = crlInfo.thisUpdate;
         cached.nextUpdate = crlInfo.nextUpdate;
+        latestCRLNumber[revocationScope] = crlInfo.crlNumber;
 
+        emit CRLRevokedSetActivated(revocationScope, revokedSetHash, crlInfo.revokedSerials.length, reused);
         emit CRLUpdated(
-            issuerHash, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
+            revocationScope, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
         );
+    }
+
+    /// @dev Validate a direct CRL signer certificate path to a trusted root.
+    ///      This contract intentionally supports complete, direct CRLs only: the first
+    ///      certificate must be a CA authorized for both certificate and CRL signing.
+    /// @param signerChain Certificates ordered as [CRL signer, parent(s), trusted root]
+    function _verifyCRLSignerChain(bytes[] calldata signerChain) internal view {
+        uint256 signerChainLength = signerChain.length;
+        if (signerChainLength == 0 || signerChainLength > 4) {
+            revert InvalidCertChainLength();
+        }
+
+        bytes32 rootCertHash = keccak256(signerChain[signerChainLength - 1]);
+        if (!verifiedCA[rootCertHash]) {
+            revert CRLSignerNotTrusted();
+        }
+
+        // A root CRL can always refresh itself. For subordinate signers in strict
+        // mode, each issuing CA above the signer must already have a current CRL.
+        if (strictCRLMode) {
+            _checkCRLValidityForChain(signerChain);
+        }
+
+        // A direct CRL signer must explicitly be authorized to sign CRLs.
+        (bool keyUsageExists, uint16 keyUsage) = LibX509.getKeyUsage(signerChain[0]);
+        uint16 keyUsageCRLSign = 0x0200;
+        if (!keyUsageExists || (keyUsage & keyUsageCRLSign) == 0) {
+            revert CRLSignNotSet();
+        }
+
+        for (uint256 i = 0; i < signerChainLength; i++) {
+            bytes32 certHash = keccak256(signerChain[i]);
+            for (uint256 j = 0; j < i; j++) {
+                if (certHash == keccak256(signerChain[j])) {
+                    revert InvalidCertificateChain();
+                }
+            }
+
+            // The CRL signer is the certification-path target and is not counted
+            // as an intermediate CA for pathLenConstraint purposes.
+            uint256 intermediateCACount = i == 0 ? 0 : i - 1;
+            _verifyCertificateConstraints(signerChain[i], false, intermediateCACount);
+
+            uint256 issuerIndex = i + 1 < signerChainLength ? i + 1 : i;
+            bytes32 revocationScope = _computeRevocationScope(signerChain[issuerIndex]);
+            _requireCertificateNotRevoked(signerChain[i], revocationScope);
+        }
+
+        for (uint256 i = 0; i + 1 < signerChainLength; i++) {
+            bytes memory issuerDN = LibX509.getCertIssuerDN(signerChain[i]);
+            bytes memory parentSubjectDN = LibX509.getCertSubjectDN(signerChain[i + 1]);
+            if (keccak256(issuerDN) != keccak256(parentSubjectDN)) {
+                revert IssuerSubjectDNMismatch();
+            }
+
+            (bool akidExists, bytes memory akid) = LibX509.getAuthorityKeyIdentifier(signerChain[i]);
+            (bool skidExists, bytes memory skid) = LibX509.getSubjectKeyIdentifier(signerChain[i + 1]);
+            if (!skidExists || skid.length == 0) {
+                revert IssuerCertMissingSKID();
+            }
+            if (!akidExists || akid.length == 0 || keccak256(akid) != keccak256(skid)) {
+                revert CertChainAKIDMismatch(i, akid, skid);
+            }
+
+            CertPubkey memory parentPubkey = LibX509.getPubkey(signerChain[i + 1]);
+            if (!verifyCertSignature(signerChain[i], parentPubkey)) {
+                revert InvalidSignature();
+            }
+        }
     }
 
     /// @notice Verifies a certificate's signature using the issuer's public key
@@ -270,7 +399,7 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         uint256 verifiedFrom = _findCachedIntermediate(bindingHashes);
 
         // Step 4: Perform verification
-        CertPubkey[] memory issuers = _verifyChain(certs, verifiedFrom);
+        CertPubkey[] memory issuers = _verifyChain(certs, verifiedFrom, true, false);
 
         // Step 5: Cache newly verified intermediates
         _cacheIntermediates(bindingHashes);
@@ -306,9 +435,12 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
     ///         1. Certificate constraints (validity, CA, revocation)
     ///         2. Issuer-Subject DN linkage: Issuer DN of certs[i] must match Subject DN of certs[i+1]
     ///         3. Cryptographic signatures
-    function _verifyChain(bytes[] calldata certs, uint256 verifiedFrom) internal view returns (CertPubkey[] memory) {
+    function _verifyChain(bytes[] calldata certs, uint256 verifiedFrom, bool targetIsLeaf, bool skipTargetRevocation)
+        internal
+        view
+        returns (CertPubkey[] memory)
+    {
         CertPubkey[] memory issuers = new CertPubkey[](certs.length);
-
         // Get all issuers
         for (uint256 i = 0; i < certs.length; i++) {
             issuers[i] = LibX509.getPubkey(certs[i]);
@@ -320,7 +452,13 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
             if (i >= 1) {
                 pathLen = i - 1;
             }
-            _verifyCertificateConstraints(certs[i], i == 0, pathLen);
+            _verifyCertificateConstraints(certs[i], i == 0 && targetIsLeaf, pathLen);
+
+            if (!(skipTargetRevocation && i == 0)) {
+                uint256 issuerIndex = i + 1 < certs.length ? i + 1 : i;
+                bytes32 revocationScope = _computeRevocationScope(certs[issuerIndex]);
+                _requireCertificateNotRevoked(certs[i], revocationScope);
+            }
         }
 
         // Verify Issuer-Subject DN linkage per RFC 5280 Section 6.1.3
@@ -337,6 +475,19 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         LibX509.verifyDNChainLinkage(certs);
         LibX509.verifyAKIDSKIDChainLinkage(certs);
 
+        // The shared helper permits a missing AKID only for an end-entity target.
+        // A CA used as the path target remains subject to the CA AKID requirement.
+        if (!targetIsLeaf && certs.length > 1) {
+            (bool akidExists, bytes memory akid) = LibX509.getAuthorityKeyIdentifier(certs[0]);
+            (bool skidExists, bytes memory skid) = LibX509.getSubjectKeyIdentifier(certs[1]);
+            if (!skidExists || skid.length == 0) {
+                revert IssuerCertMissingSKID();
+            }
+            if (!akidExists || akid.length == 0 || keccak256(akid) != keccak256(skid)) {
+                revert CertChainAKIDMismatch(0, akid, skid);
+            }
+        }
+
         // Verify signatures from leaf to verifiedFrom
         for (uint256 i = 0; i < verifiedFrom; i++) {
             bool result = verifyCertSignature(certs[i], issuers[i + 1]);
@@ -346,33 +497,36 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         return issuers;
     }
 
-    /// @dev Compute revocation key from issuer DN and optional AKID
-    /// @param issuerDN The DER-encoded issuer Distinguished Name
-    /// @param akid The Authority Key Identifier (empty if not present)
-    /// @return The computed revocation key
-    function _computeRevocationKey(bytes memory issuerDN, bytes memory akid) internal pure returns (bytes32) {
-        // If AKID is present, use DN + AKID for unique identification
-        // This prevents cross-CA conflicts when different CAs share the same DN
-        if (akid.length > 0) {
-            return keccak256(abi.encode(issuerDN, akid));
-        }
-        // Fallback to DN-only for backward compatibility with old certificates
-        return keccak256(issuerDN);
+    /// @dev Derive a stable CA identity from its exact subject DN and actual public key.
+    ///      SKID is intentionally excluded because it can be reassigned across certificate
+    ///      renewals and is not itself cryptographically bound to the public key.
+    function _computeIssuerIdentity(bytes calldata issuerCert) internal pure returns (bytes32) {
+        bytes memory subjectDN = LibX509.getCertSubjectDN(issuerCert);
+        CertPubkey memory pubkey = LibX509.getPubkey(issuerCert);
+        bytes32 pubkeyHash = LibX509.canonicalPubkeyHash(pubkey);
+        return keccak256(abi.encode(ISSUER_IDENTITY_V1, keccak256(subjectDN), pubkey.algo, pubkey.params, pubkeyHash));
     }
 
-    /// @dev Verify individual certificate (validity, constraints, revocation)
+    /// @dev Derive one revocation namespace for a CA identity across every authenticated path.
+    function _computeRevocationScope(bytes calldata issuerCert) internal pure returns (bytes32) {
+        return keccak256(abi.encode(REVOCATION_SCOPE_V2, _computeIssuerIdentity(issuerCert)));
+    }
+
+    function _computeRevokedSetHash(bytes32 revocationScope, uint256[] memory serials) internal pure returns (bytes32) {
+        return keccak256(abi.encode(REVOKED_SET_DOMAIN, revocationScope, serials));
+    }
+
+    /// @dev Verify individual certificate validity and CA/leaf constraints.
     function _verifyCertificateConstraints(bytes calldata cert, bool isLeaf, uint256 pathLen) internal view {
+        LibX509.validateCertificateExtensions(cert);
         LibX509.checkCertValidity(cert);
         LibX509.checkCAConstraints(cert, pathLen, isLeaf);
+    }
 
-        bytes memory issuerDN = LibX509.getCertIssuerDN(cert);
+    /// @dev Reject a certificate serial revoked by its authenticated issuer scope.
+    function _requireCertificateNotRevoked(bytes calldata cert, bytes32 revocationScope) internal view {
         uint256 serialNumber = LibX509.getCertSerialNumber(cert);
-
-        // Extract AKID to uniquely identify issuer
-        (, bytes memory akid) = LibX509.getAuthorityKeyIdentifier(cert);
-        bytes32 issuerHash = _computeRevocationKey(issuerDN, akid);
-
-        require(!revokedCertificates[issuerHash][serialNumber], CertificateAlreadyRevoked());
+        require(!revokedCertificates(revocationScope, serialNumber), CertificateAlreadyRevoked());
     }
 
     /// @dev Cache newly verified intermediate certificates
@@ -395,13 +549,8 @@ abstract contract CertChainRegistry is ICertChainRegistry, Ownable {
         // For each certificate (except the leaf), check its issuer has a valid CRL
         // We check certs[1..n] as issuers (root CA and intermediates)
         for (uint256 i = 1; i < certs.length; i++) {
-            bytes memory subjectDN = LibX509.getCertSubjectDN(certs[i]);
-            (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(certs[i]);
-
-            // Compute issuer hash (this cert is the issuer of certs[i-1])
-            bytes32 issuerHash = _computeRevocationKey(subjectDN, skid);
-
-            CRLData storage cached = crlCache[issuerHash];
+            bytes32 revocationScope = _computeRevocationScope(certs[i]);
+            CRLData storage cached = crlCache[revocationScope];
 
             // Check if CRL exists
             if (cached.thisUpdate == 0) {

@@ -261,7 +261,8 @@ library Asn1Decode {
             ixLastContentByte = uint80(ixFirstContentByte + length - 1);
         } else {
             uint8 lengthbytesLength = uint8(der[ix + 1] & 0x7F);
-            bool invalidLengthBytes = lengthbytesLength == 0 || ix + 2 + lengthbytesLength >= n;
+            bool invalidLengthBytes =
+                lengthbytesLength == 0 || lengthbytesLength > 32 || lengthbytesLength >= n - ix - 2;
             if (invalidLengthBytes) {
                 revert Asn1InvalidLengthBytes();
             }
@@ -275,6 +276,10 @@ library Asn1Decode {
                 length = uint256(der.readBytesN(ix + 2, lengthbytesLength) >> (32 - lengthbytesLength) * 8);
                 if (length == 0) revert Asn1LengthCannotBeZero();
             }
+            // DER requires the shortest possible length encoding. Long form is
+            // reserved for values >= 128, and a nonzero first length octet
+            // makes the length-of-length minimal for the encoded value.
+            if (length < 128 || der[ix + 2] == 0) revert Asn1InvalidLengthBytes();
             ixFirstContentByte = uint80(ix + 2 + lengthbytesLength);
             ixLastContentByte = uint80(ixFirstContentByte + length - 1);
         }

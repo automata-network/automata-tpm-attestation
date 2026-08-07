@@ -73,6 +73,16 @@ error EcdsaComponentTooLarge();
 
 // --- Certificate Format Errors ---
 error InvalidAsn1Tag();
+/// @dev The signed and outer certificate signature AlgorithmIdentifiers differ.
+error CertificateSignatureAlgorithmMismatch();
+/// @dev Certificate Extensions or an Extension field is not canonical, bounded DER.
+error InvalidCertificateExtensions();
+/// @dev Extension identifiers must be unique within one certificate.
+error DuplicateCertificateExtension();
+/// @dev Critical extensions are accepted only when their semantics are enforced.
+error UnsupportedCriticalCertificateExtension();
+/// @dev Name constraints require path-wide processing and are rejected until implemented.
+error NameConstraintsNotSupported();
 
 // --- CA Constraints Errors ---
 error LeafCertHasPathLen();
@@ -109,7 +119,14 @@ error CRLNotYetValid();
 error CRLSignatureVerificationFailed();
 error CRLIssuerMismatch();
 error CRLRollbackAttempt();
+/// @dev RFC 5280 Section 5.2.3 requires every conforming CRL to include CRLNumber
+error CRLMissingNumber();
+/// @dev CRLNumber must be unique, non-critical, non-negative, and valid DER
+error InvalidCRLNumber();
 error InvalidCRLFormat();
+error CRLSignerNotTrusted();
+/// @dev The direct CRL signer must explicitly enable the cRLSign KeyUsage bit
+error CRLSignNotSet();
 error CRLRequiredInStrictMode();
 error CRLExpiredInStrictMode();
 /// @dev Per RFC 5280 Section 5.2.1, conforming CRL issuers MUST include AKID extension
@@ -121,6 +138,8 @@ error DeltaCRLNotSupported();
 /// @dev Partitioned CRLs with Issuing Distribution Point (RFC 5280 Section 5.2.5) are not supported
 /// Only complete CRLs covering all certificate types are accepted
 error PartitionedCRLNotSupported();
+/// @dev Indirect-CRL entry issuer switching is not supported by the direct-CRL model.
+error IndirectCRLNotSupported();
 
 // --- Serial Number Validation Errors ---
 /// @dev Per RFC 5280 Section 4.1.2.2:
