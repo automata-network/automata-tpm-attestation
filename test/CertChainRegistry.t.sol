@@ -13,6 +13,7 @@ import {LibX509, CertPubkey, CRLInfo} from "src/lib/LibX509.sol";
 import {LibX509Verify} from "src/lib/LibX509Verify.sol";
 import {
     CertificateAlreadyRevoked,
+    IssuerCertMissingBasicConstraints,
     CRLIssuerMismatch,
     CRLRollbackAttempt,
     CRLRequiredInStrictMode,
@@ -63,6 +64,18 @@ contract CertChainRegistry_Test is Test {
     /// @notice Helper function to load a certificate from JSON
     function _loadCertificate(string memory certType) internal view returns (bytes[] memory) {
         return certificatesJson.readBytesArrayOr(string(abi.encodePacked(".", certType)), new bytes[](0));
+    }
+
+    function _single(bytes memory cert) internal pure returns (bytes[] memory chain) {
+        chain = new bytes[](1);
+        chain[0] = cert;
+    }
+
+    function issuerHash(bytes calldata cert) external pure returns (bytes32) {
+        CertPubkey memory key = LibX509.getPubkey(cert);
+        return keccak256(
+            abi.encode("automata.tpm.crl.issuer.v1", LibX509.getCertSubjectDN(cert), key.algo, key.params, key.data)
+        );
     }
 
     function _loadEmptyCRL() internal view returns (bytes memory) {
@@ -303,13 +316,11 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // Update CRL
         bytes memory crlBytes = _loadEmptyCRL();
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _single(caCert));
 
         // Verify CRL was cached
         CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
-        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        bytes32 issuerHash = this.issuerHash(caCert);
 
         (bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate) = registry.crlCache(issuerHash);
         assertEq(crlHash, keccak256(crlBytes), "CRL hash should match");
@@ -347,7 +358,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
     }
 
     /// @notice Test updateCRL with different certificate (invalid issuer) reverts
-    function test_updateCRL_issuerMismatch_reverts() public {
+    function test_updateCRL_endEntitySigner_reverts() public {
         // Warp to a time within CRL validity (Nov 23 2025 - Nov 21 2035)
         vm.warp(1764979200); // Dec 6 2025 00:00:00 UTC
 
@@ -355,13 +366,12 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         require(certs.length == 2, "Need 2 certs");
 
         bytes memory caCert = certs[1]; // Root CA
-        bytes memory leafCert = certs[0]; // Leaf cert (wrong issuer)
         registry.addCA(caCert);
 
         // Try to update CRL with wrong issuer cert
         bytes memory crlBytes = _loadEmptyCRL();
-        vm.expectRevert(CRLIssuerMismatch.selector);
-        registry.updateCRL(crlBytes, leafCert);
+        vm.expectRevert(IssuerCertMissingBasicConstraints.selector);
+        registry.updateCRL(crlBytes, certs);
     }
 
     /// @notice Test updateCRL with rollback attempt reverts
@@ -377,12 +387,12 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // First update with newer CRL
         bytes memory revokedCrl = _loadRevokedCRL();
-        registry.updateCRL(revokedCrl, caCert);
+        registry.updateCRL(revokedCrl, _single(caCert));
 
         // Try to rollback to older CRL (should revert)
         bytes memory emptyCrl = _loadEmptyCRL();
         vm.expectRevert(CRLRollbackAttempt.selector);
-        registry.updateCRL(emptyCrl, caCert);
+        registry.updateCRL(emptyCrl, _single(caCert));
     }
 
     /// @notice Test updateCRL emits CRLUpdated event
@@ -398,9 +408,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         bytes memory crlBytes = _loadEmptyCRL();
         CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
-        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        bytes32 issuerHash = this.issuerHash(caCert);
         bytes32 crlHash = keccak256(crlBytes);
 
         vm.expectEmit(true, false, false, true);
@@ -408,7 +416,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
             issuerHash, crlInfo.issuerDN, crlInfo.authorityKeyId, crlHash, crlInfo.thisUpdate, crlInfo.nextUpdate
         );
 
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _single(caCert));
     }
 
     /// @notice Test updateCRL can update to newer CRL
@@ -424,19 +432,17 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // First update with empty CRL
         bytes memory emptyCrl = _loadEmptyCRL();
-        registry.updateCRL(emptyCrl, caCert);
+        registry.updateCRL(emptyCrl, _single(caCert));
 
         CRLInfo memory oldCrlInfo = this._parseCRLHelper(emptyCrl);
 
         // Update to newer CRL with revoked cert (has later thisUpdate)
         bytes memory revokedCrl = _loadRevokedCRL();
-        registry.updateCRL(revokedCrl, caCert);
+        registry.updateCRL(revokedCrl, _single(caCert));
 
         // Verify cache was updated
         CRLInfo memory newCrlInfo = this._parseCRLHelper(revokedCrl);
-        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        bytes32 issuerHash = this.issuerHash(caCert);
 
         (bytes32 crlHash, uint256 thisUpdate,) = registry.crlCache(issuerHash);
         assertEq(crlHash, keccak256(revokedCrl), "CRL hash should be updated");
@@ -488,15 +494,13 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes memory gcpCrl = crls[0];
 
         // Update CRL
-        registry.updateCRL(gcpCrl, gcpRootCA);
+        registry.updateCRL(gcpCrl, _single(gcpRootCA));
 
         // Verify CRL was cached
         CRLInfo memory crlInfo = this._parseCRLHelper(gcpCrl);
-        bytes memory issuerDN = LibX509.getCertSubjectDN(gcpRootCA);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(gcpRootCA);
 
-        // Compute issuer hash (using DN + SKID since CRL has AKID)
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        // Bind to the authenticated root public key.
+        bytes32 issuerHash = this.issuerHash(gcpRootCA);
 
         (bytes32 crlHash, uint256 thisUpdate, uint256 nextUpdate) = registry.crlCache(issuerHash);
 
@@ -521,13 +525,13 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         bytes memory crlBytes = _loadRevokedCRL();
 
         // Verify certificate is not revoked before CRL update
-        assertFalse(registry.isCertificateRevoked(leafCert), "Certificate should not be revoked yet");
+        assertFalse(registry.isCertificateRevoked(certs), "Certificate should not be revoked yet");
 
         // Update CRL - this should sync revocations to blacklist
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _single(caCert));
 
         // Verify certificate is now revoked in blacklist
-        assertTrue(registry.isCertificateRevoked(leafCert), "Certificate should be revoked after CRL sync");
+        assertTrue(registry.isCertificateRevoked(certs), "Certificate should be revoked after CRL sync");
 
         // Verify that verifyCertChain will fail for revoked certificate
         bytes[] memory chain = new bytes[](2);
@@ -554,12 +558,10 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
         CRLInfo memory crlInfo = this._parseCRLHelper(crlBytes);
 
         // Update CRL
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _single(caCert));
 
         // Verify all revoked serials are synced to blacklist
-        bytes memory issuerDN = LibX509.getCertSubjectDN(caCert);
-        (, bytes memory skid) = LibX509.getSubjectKeyIdentifier(caCert);
-        bytes32 issuerHash = keccak256(abi.encode(issuerDN, skid));
+        bytes32 issuerHash = this.issuerHash(caCert);
 
         // Check that all revoked serials from CRL are now in blacklist
         for (uint256 i = 0; i < crlInfo.revokedSerials.length; i++) {
@@ -600,7 +602,7 @@ contract CertChainRegistry_CRL_Test is CertChainRegistry_Test {
 
         // 4. Upload CRL: succeeds with valid CRL
         bytes memory crlBytes = _loadEmptyCRL();
-        registry.updateCRL(crlBytes, caCert);
+        registry.updateCRL(crlBytes, _single(caCert));
         registry.verifyCertChain(certs);
 
         // 5. Warp to future: fails with expired CRL

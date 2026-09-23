@@ -38,6 +38,7 @@ import {
     CertNotCa,
     PathLenConstraintViolated,
     KeyCertSignNotSet,
+    CRLSignNotSet,
     InvalidBasicConstraintsFormat,
     InvalidTimeTag,
     InvalidTimeFormat,
@@ -844,6 +845,13 @@ library LibX509 {
             uint16 KEY_USAGE_KEY_CERT_SIGN = 0x0400;
             if ((keyUsage & KEY_USAGE_KEY_CERT_SIGN) == 0) revert KeyCertSignNotSet();
         }
+    }
+
+    /// @dev This registry accepts direct CA-issued CRLs and requires explicit cRLSign permission.
+    function checkCRLSign(bytes memory der) internal pure {
+        (bool exists, uint16 keyUsage) = getKeyUsage(der);
+        if (!exists) revert MissingKeyUsageExtension();
+        if ((keyUsage & 0x0200) == 0) revert CRLSignNotSet();
     }
 
     /// @dev Extracts BasicConstraints extension from an X.509 certificate

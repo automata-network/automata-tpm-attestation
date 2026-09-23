@@ -98,7 +98,7 @@ function verifyTpmQuote(
 **Example:**
 
 ```solidity
-import {CertPubkey} from "@automata-network/automata-tpm-attestation/lib/LibX509.sol";
+import {CertPubkey, LibX509} from "@automata-network/automata-tpm-attestation/lib/LibX509.sol";
 
 bytes[] memory certChain = new bytes[](3);
 certChain[0] = akLeafCert;
@@ -212,7 +212,9 @@ Manage trusted Certificate Authorities (owner only).
 
 #### `verifyCertChain(bytes[] certs)`
 
-Verify a certificate chain against trusted CAs.
+Verify a certificate chain against trusted CAs. Order certificates from target to root.
+The target may be a CA or an end entity. Attestation callers must separately apply
+`LibX509.checkCAConstraints(certs[0], 0, true)` before accepting the key.
 
 #### `verifyCertSignature(bytes cert, CertPubkey issuer)`
 
@@ -220,9 +222,10 @@ Verify a certificate's signature using the issuer's public key (supports RSA and
 
 ### CRL (Certificate Revocation List) Management
 
-#### `updateCRL(bytes crl, bytes issuerCert)`
+#### `updateCRL(bytes crl, bytes[] issuerChain)`
 
 Update the Certificate Revocation List for a specific issuer. This function:
+- Authenticates `[CRL signer, intermediate(s), trusted root]` and requires CA and `cRLSign` permission
 - Verifies CRL validity period
 - Verifies CRL signature against issuer's public key
 - Validates issuer DN and AKID match
@@ -230,15 +233,23 @@ Update the Certificate Revocation List for a specific issuer. This function:
 - Syncs revoked certificates to the blacklist
 
 ```solidity
-function updateCRL(bytes calldata crl, bytes calldata issuerCert) external;
+function updateCRL(bytes calldata crl, bytes[] calldata issuerChain) external;
 ```
 
-#### `isCertificateRevoked(bytes cert)`
+Anyone may relay a valid CRL. Stored revocations bind to the authenticated issuer's
+subject name and public key, not its key identifier alone. In strict mode, publish
+ancestor CRLs first. A signer can submit its first CRL or refresh an expired CRL
+without requiring its own CRL to already be fresh. Ancestor CRLs must still be fresh.
 
-Check if a certificate has been revoked.
+#### `isCertificateRevoked(bytes[] certs)`
+
+Authenticate `[target, issuer(s), trusted root]` and return the target's revocation
+status. Invalid chains and revoked ancestors revert. Strict-mode CRL requirements
+still apply. A `false` result in non-strict mode means no revocation is recorded;
+it does not prove that a current CRL has been received.
 
 ```solidity
-function isCertificateRevoked(bytes calldata cert) external view returns (bool);
+function isCertificateRevoked(bytes[] calldata certs) external view returns (bool);
 ```
 
 #### `setStrictCRLMode(bool enabled)`
@@ -310,7 +321,7 @@ contract MyApplication {
 For gas optimization, you can pre-verify and cache Attestation Keys:
 
 ```solidity
-import {CertPubkey} from "@automata-network/automata-tpm-attestation/lib/LibX509.sol";
+import {CertPubkey, LibX509} from "@automata-network/automata-tpm-attestation/lib/LibX509.sol";
 import {ITpmAttestation} from "@automata-network/automata-tpm-attestation/interfaces/ITpmAttestation.sol";
 
 contract OptimizedTpmVerifier {
@@ -326,6 +337,7 @@ contract OptimizedTpmVerifier {
         bytes32 akHash
     ) external onlyOwner {
         CertPubkey memory akPub = tpmAttestation.verifyCertChain(akCertchain);
+        LibX509.checkCAConstraints(akCertchain[0], 0, true);
         trustedAKs[akHash] = akPub;
     }
 

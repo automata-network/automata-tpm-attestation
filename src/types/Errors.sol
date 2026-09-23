@@ -116,6 +116,7 @@ error BytesInvalidBase32DecodedValue();
 error BytesInvalidBase32Length();
 
 // --- CRL Errors ---
+error CRLSignNotSet();
 error CRLExpired();
 error CRLNotYetValid();
 error CRLSignatureVerificationFailed();

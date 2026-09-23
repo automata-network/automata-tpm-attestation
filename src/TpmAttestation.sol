@@ -73,6 +73,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
     {
         require(akCertchain.length > 0, InvalidCertChainLength());
 
+        LibX509.checkCAConstraints(akCertchain[0], 0, true);
         CertPubkey memory akPub = verifyCertChain(akCertchain);
         require(akPub.data.length > 0, InvalidCertificateChain());
 

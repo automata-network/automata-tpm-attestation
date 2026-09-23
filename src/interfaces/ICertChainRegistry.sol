@@ -40,23 +40,25 @@ interface ICertChainRegistry {
     /// @dev should implement access-control
     function removeCA(bytes calldata ca) external;
 
-    /// @notice Check if a certificate is revoked
-    /// @param cert The DER-encoded certificate to check
+    /// @notice Authenticate a chain and return the first certificate's revocation status
+    /// @dev Invalid chains, revoked ancestors, or missing/expired strict-mode CRLs revert.
+    /// @param certs DER certificates ordered [target, issuer(s), trusted root]
     /// @return True if the certificate is revoked
-    function isCertificateRevoked(bytes calldata cert) external view returns (bool);
+    function isCertificateRevoked(bytes[] calldata certs) external view returns (bool);
 
     function removeIntermediateCerts(bytes32[] calldata certHashes) external;
 
     /// @notice Update CRL for a specific issuer
     /// @param crl The DER-encoded CRL
-    /// @param issuerCert The issuer's certificate for signature verification
-    function updateCRL(bytes calldata crl, bytes calldata issuerCert) external;
+    /// @param issuerChain DER certificates ordered [CRL signer, issuer(s), trusted root]
+    function updateCRL(bytes calldata crl, bytes[] calldata issuerChain) external;
 
     function verifyCertSignature(bytes calldata cert, CertPubkey memory issuer) external view returns (bool);
 
     /// @notice Verifies a certificate chain
     /// @param certs - An array of X509 certificates in DER format.
-    /// @return the public key of the leaf certificate
+    /// @dev The first certificate may be a CA or an end entity. Callers enforce its intended use.
+    /// @return the public key of the first certificate
     function verifyCertChain(bytes[] calldata certs) external returns (CertPubkey memory);
 
     // Root CAs: cert hash => true
