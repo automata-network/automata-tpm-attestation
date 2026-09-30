@@ -288,7 +288,7 @@ contract TpmAttestation is CertChainRegistry, ITpmAttestation {
         } else if (sigAlgo.scheme == TPMConstants.TPM_ALG_ECDSA) {
             // TPM ECDSA signature format:
             // [sigAlg: 2 bytes][hashAlg: 2 bytes][sigSize (r size): 2 bytes][r: 32 bytes][sSize: 2 bytes][s: 32 bytes]
-            require(tpmSignature.length >= 40, TpmSignatureTooShort());
+            require(tpmSignature.length >= 72, TpmSignatureTooShort());
             require(sigSize == 32, InvalidEcdsaSignature());
             uint16 sSize = uint16(bytes2(tpmSignature[6 + sigSize:8 + sigSize]));
             require(sSize == 32, InvalidEcdsaSignature());
