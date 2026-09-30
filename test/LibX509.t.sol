@@ -463,7 +463,7 @@ contract LibX509_CheckCAConstraints_Test is LibX509_Test {
         bytes memory leafCert = _loadCertificate("gcp_snp_vek_certs")[0];
 
         // Should revert when a leaf cert is incorrectly marked as CA (isLeaf=false)
-        vm.expectRevert("IssuerCertMissingBasicConstraints()");
+        vm.expectRevert(IssuerCertMissingBasicConstraints.selector);
         this._checkCAConstraints(leafCert, 0, false);
     }
 
@@ -481,7 +481,7 @@ contract LibX509_CheckCAConstraints_Test is LibX509_Test {
         LibX509.checkCAConstraints(intermediateCert, 0, false);
 
         // Should fail with remainingCAs=1 (exceeds pathLen)
-        vm.expectRevert("PathLenConstraintViolated()");
+        vm.expectRevert(PathLenConstraintViolated.selector);
         this._checkCAConstraints(intermediateCert, 1, false);
     }
 
